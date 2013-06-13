@@ -54,32 +54,34 @@ func main() {
 	}
 }
 
-func parseTagBasedMetric(metric string) (tags map[string]string, err error) {
+func parseTagBasedMetric(metric string) (metric_id string, tags map[string]string, err error) {
     fmt.Printf(">incoming: %s\n", metric)
     // metric_spec value unix_timestamp
     elements := strings.Split(metric, " ")
+    metric_id = ""
     if len(elements) != 3  {
-        return nil, errors.New("metric doesn't contain exactly 3 nodes")
+        return metric_id, nil, errors.New("metric doesn't contain exactly 3 nodes")
     }
-    nodes := strings.Split(elements[0], ".")
+    metric_id = elements[0]
+    nodes := strings.Split(metric_id, ".")
     tags = make(map[string]string)
     // TODO make sure incoming tags are sorted
     for _, node := range nodes {
         tag := strings.Split(node, "=")
         if len(tag) != 2 {
-            return nil, errors.New("bad metric spec: each node must be a 'tag_k=tag_v' pair")
+            return metric_id, nil, errors.New("bad metric spec: each node must be a 'tag_k=tag_v' pair")
         }
         if tag[0] == "" || tag[1] == "" {
-            return nil, errors.New("bad metric spec: tag_k and tag_v must be non-empty strings")
+            return metric_id, nil, errors.New("bad metric spec: tag_k and tag_v must be non-empty strings")
         }
 
         tags[tag[0]] = tag[1]
     }
     if _,ok := tags["unit"]; !ok {
-        return nil, errors.New("bad metric spec: unit tag (mandatory) not specified")
+        return metric_id, nil, errors.New("bad metric spec: unit tag (mandatory) not specified")
     }
     if len(tags) < 2 {
-        return nil, errors.New("bad metric spec: must have at least one tag_k/tag_v pair beyond unit")
+        return metric_id, nil, errors.New("bad metric spec: must have at least one tag_k/tag_v pair beyond unit")
     }
     return
 }
@@ -103,7 +105,7 @@ func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, 
         str := string(buf[0:bytes])
         if(strings.ContainsAny(str, "=")) {
             str = strings.TrimSpace(str)
-            tags, err:= parseTagBasedMetric(str)
+            metric_id, tags, err:= parseTagBasedMetric(str)
             if err != nil {
                 fmt.Printf("DEBUG: invalid tag based metric, ignoring (%s)\n", err)
             } else {
@@ -135,16 +137,21 @@ func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, 
                         }
                     }
                 }
-                _, err = statement_insert_metric.Exec(str)
+                _, err = statement_insert_metric.Exec(metric_id)
                 if err != nil {
-                    fmt.Fprintf(os.Stderr, "can't store metric:%s\n", err.Error())
-                    return
-                }
-                for _, tag_id := range tag_ids {
-                    _, err = statement_insert_link.Exec(str, tag_id)
-                    if err != nil {
-                        fmt.Fprintf(os.Stderr, "can't link metric to tag:%s\n", err.Error())
+                    if err.(*mysql.MySQLError).Number != 1062 { // Error 1062: Duplicate entry 'unit=f.b=aeu' for key 'PRIMARY'
+                        fmt.Fprintf(os.Stderr, "can't store metric %s:%s\n", metric_id, err.Error())
                         return
+                    }
+                } else {
+                // the metric is newly inserted.. we still have to couple it to the tags.
+                // so we assume if the metric already existed, we don't need to do this anymore. which is not very accurate since we don't use transactions yet
+                    for _, tag_id := range tag_ids {
+                        _, err = statement_insert_link.Exec(metric_id, tag_id)
+                        if err != nil {
+                            fmt.Fprintf(os.Stderr, "can't link metric %s to tag:%s\n", metric_id, err.Error())
+                            return
+                        }
                     }
                 }
                 forwardMetric(str)
