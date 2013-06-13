@@ -112,17 +112,19 @@ func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, 
                 fmt.Printf("DEBUG: valid tag based metric %s, storing tags and forwarding\n", strings.TrimSpace(str))
                 // TODO this should go in a transaction. for now we first store all tag_k=tag_v pairs (if they are orphans, it's not so bad)
                 // then add the metric, than the coupling between metric and tags. <-- all this should def. be in a transaction
-                tag_ids := make([]int64, 1)
+                tag_ids := make([]int64, 0)  //maybe set cap to len(tags) or so
                 for tag_k, tag_v := range tags {
                     fmt.Println("Key:", tag_k, "Value:", tag_v)
                     res, err := statement_insert_tag.Exec(tag_k, tag_v)
                     if err != nil {
                         if err.(*mysql.MySQLError).Number == 1062 {  // Error 1062: Duplicate entry
-                            res, err := statement_select_tag.Exec(tag_k, tag_v)
+                            var id int64
+                            err := statement_select_tag.QueryRow(tag_k, tag_v).Scan(&id)
                             if err != nil {
                                 fmt.Fprintf(os.Stderr, "Can't lookup the id of tag %s=%s: %s\n", tag_k, tag_v, err.Error())
                                 return
                             }
+                            tag_ids = append(tag_ids, id)
                         } else {
                             fmt.Fprintf(os.Stderr, "can't store tag %s=%s: %s\n", tag_k, tag_v, err.Error())
                             return
@@ -130,10 +132,10 @@ func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, 
                     } else {
                         id, err := res.LastInsertId()
                         if err != nil {
-                            tag_ids = append(tag_ids, id)
-                        } else {
                             fmt.Fprintf(os.Stderr, "can't get id for just inserted tag %s=%s: %s\n", tag_k, tag_v, err.Error())
                             return
+                        } else {
+                            tag_ids = append(tag_ids, id)
                         }
                     }
                 }
