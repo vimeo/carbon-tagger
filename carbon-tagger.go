@@ -20,10 +20,11 @@ func dieIfError(err error) {
 func main() {
 
     // connect to database to store tags
-    db, e := sql.Open("graphite_host", "carbon_tagger:carbon_tagger_pw@/carbon_tagger?charset=utf8")
+    db, err := sql.Open("mysql", "carbon_tagger:carbon_tagger_pw@tcp(graphitemachine:3306)/carbon_tagger?charset=utf8")
+    dieIfError(err)
     defer db.Close()
     // Open doesn't open a connection. Validate DSN data:
-    err := db.Ping()
+    err = db.Ping()
     dieIfError(err)
     statement_insert_tag, err := db.Prepare("INSERT INTO tags (tag_key, tag_val) VALUES( ?, ? )")
     dieIfError(err)
@@ -107,7 +108,7 @@ func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, 
                 fmt.Printf("DEBUG: valid tag based metric %s, storing tags and forwarding\n", strings.TrimSpace(str))
                 // TODO this should go in a transaction. for now we first store all tag_k=tag_v pairs (if they are orphans, it's not so bad)
                 // then add the metric, than the coupling between metric and tags. <-- all this should def. be in a transaction
-                tag_ids := make([]int, 1)
+                tag_ids := make([]int64, 1)
                 for tag_k, tag_v := range tags {
                     fmt.Println("Key:", tag_k, "Value:", tag_v)
                     res, err := statement_insert_tag.Exec(tag_k, tag_v)
@@ -116,7 +117,7 @@ func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, 
                         return
                     }
                     // TODO on ERROR 1062 (23000), select id
-                    id, err = res.LastInsertId()
+                    id, err := res.LastInsertId()
                     if err != nil {
                         tag_ids = append(tag_ids, id)
                     } else {
