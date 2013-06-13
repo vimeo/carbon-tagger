@@ -25,6 +25,12 @@ func main() {
     // Open doesn't open a connection. Validate DSN data:
     err := db.Ping()
     dieIfError(err)
+    statement_insert_tag, err := db.Prepare("INSERT INTO tags (tag_key, tag_val) VALUES( ?, ? )")
+    dieIfError(err)
+    statement_insert_metric, err := db.Prepare("INSERT INTO metrics VALUES( ? )")
+    dieIfError(err)
+    statement_insert_link, err := db.Prepare("INSERT INTO metrics_tags VALUES( ?, ? )")
+    dieIfError(err)
    
     // listen for incoming metrics
 	service := ":2003"
@@ -40,7 +46,7 @@ func main() {
 		if err != nil {
 			continue
 		}
-		handleClient(conn_in, db)
+		handleClient(conn_in, db, statement_insert_tag, statement_insert_metric, statement_insert_link)
 		conn_in.Close()
 	}
 }
@@ -84,7 +90,7 @@ func forwardMetric(metric string) {
    // }
 }
 
-func handleClient(conn_in net.Conn, db DB) {
+func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, statement_insert_metric *sql.Stmt, statement_insert_link *sql.Stmt) {
 	var buf [512]byte
 	for {
 		bytes, err := conn_in.Read(buf[0:])
@@ -101,46 +107,30 @@ func handleClient(conn_in net.Conn, db DB) {
                 fmt.Printf("DEBUG: valid tag based metric %s, storing tags and forwarding\n", strings.TrimSpace(str))
                 // TODO this should go in a transaction. for now we first store all tag_k=tag_v pairs (if they are orphans, it's not so bad)
                 // then add the metric, than the coupling between metric and tags. <-- all this should def. be in a transaction
-                stmtIns, err := db.Prepare("INSERT INTO tags (tag_key, tag_val) VALUES( ?, ? )")
-                if err != nil {
-                    fmt.Fprintf(os.Stderr, "db prepare failed\n")
-                    return
-                }
                 tag_ids := make([]int, 1)
                 for tag_k, tag_v := range tags {
                     fmt.Println("Key:", tag_k, "Value:", tag_v)
-                    _, err = stmtIns.Exec(tag_k, tag_v)
+                    res, err := statement_insert_tag.Exec(tag_k, tag_v)
                     if err != nil {
                         fmt.Fprintf(os.Stderr, "can't store tag %s=%s\n", tag_k, tag_v)
                         return
                     }
                     // TODO on ERROR 1062 (23000), select id
-                    id := nil
                     id, err = res.LastInsertId()
                     if err != nil {
-                        append(tag_ids, id)
+                        tag_ids = append(tag_ids, id)
                     } else {
                         fmt.Fprintf(os.Stderr, "can't store tag %s=%s\n", tag_k, tag_v)
                         return
                     }
                 }
-                stmtIns, err := db.Prepare("INSERT INTO metrics VALUES( ? )")
-                if err != nil {
-                    fmt.Fprintf(os.Stderr, "db prepare failed\n")
-                    return
-                }
-                _, err = stmtIns.Exec(str)
+                _, err = statement_insert_metric.Exec(str)
                 if err != nil {
                     fmt.Fprintf(os.Stderr, "db insert failed\n")
                     return
                 }
-                stmtIns, err := db.Prepare("INSERT INTO metrics_tags VALUES( ?, ? )")
-                if err != nil {
-                    fmt.Fprintf(os.Stderr, "db prepare failed\n")
-                    return
-                }
                 for _, tag_id := range tag_ids {
-                    _, err = stmtIns.Exec(str, tag_id)
+                    _, err = statement_insert_link.Exec(str, tag_id)
                     if err != nil {
                         fmt.Fprintf(os.Stderr, "db insert failed\n")
                         return
