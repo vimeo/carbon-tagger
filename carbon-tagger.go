@@ -7,7 +7,7 @@ import (
     "strings"
     "errors"
     "database/sql"
-    _ "github.com/go-sql-driver/mysql"
+    "github.com/go-sql-driver/mysql"
 )
 
 func dieIfError(err error) {
@@ -28,6 +28,8 @@ func main() {
     dieIfError(err)
     statement_insert_tag, err := db.Prepare("INSERT INTO tags (tag_key, tag_val) VALUES( ?, ? )")
     dieIfError(err)
+    statement_select_tag, err := db.Prepare("SELECT tag_id FROM tags WHERE tag_key=? AND tag_val=?")
+    dieIfError(err)
     statement_insert_metric, err := db.Prepare("INSERT INTO metrics VALUES( ? )")
     dieIfError(err)
     statement_insert_link, err := db.Prepare("INSERT INTO metrics_tags VALUES( ?, ? )")
@@ -47,7 +49,7 @@ func main() {
 		if err != nil {
 			continue
 		}
-		handleClient(conn_in, db, statement_insert_tag, statement_insert_metric, statement_insert_link)
+		handleClient(conn_in, db, statement_insert_tag, statement_select_tag, statement_insert_metric, statement_insert_link)
 		conn_in.Close()
 	}
 }
@@ -91,7 +93,7 @@ func forwardMetric(metric string) {
    // }
 }
 
-func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, statement_insert_metric *sql.Stmt, statement_insert_link *sql.Stmt) {
+func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, statement_select_tag *sql.Stmt, statement_insert_metric *sql.Stmt, statement_insert_link *sql.Stmt) {
 	var buf [512]byte
 	for {
 		bytes, err := conn_in.Read(buf[0:])
@@ -113,27 +115,35 @@ func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, 
                     fmt.Println("Key:", tag_k, "Value:", tag_v)
                     res, err := statement_insert_tag.Exec(tag_k, tag_v)
                     if err != nil {
-                        fmt.Fprintf(os.Stderr, "can't store tag %s=%s\n", tag_k, tag_v)
-                        return
-                    }
-                    // TODO on ERROR 1062 (23000), select id
-                    id, err := res.LastInsertId()
-                    if err != nil {
-                        tag_ids = append(tag_ids, id)
+                        if err.(*mysql.MySQLError).Number == 1062 {  // Error 1062: Duplicate entry
+                            res, err := statement_select_tag.Exec(tag_k, tag_v)
+                            if err != nil {
+                                fmt.Fprintf(os.Stderr, "Can't lookup the id of tag %s=%s: %s\n", tag_k, tag_v, err.Error())
+                                return
+                            }
+                        } else {
+                            fmt.Fprintf(os.Stderr, "can't store tag %s=%s: %s\n", tag_k, tag_v, err.Error())
+                            return
+                        }
                     } else {
-                        fmt.Fprintf(os.Stderr, "can't store tag %s=%s\n", tag_k, tag_v)
-                        return
+                        id, err := res.LastInsertId()
+                        if err != nil {
+                            tag_ids = append(tag_ids, id)
+                        } else {
+                            fmt.Fprintf(os.Stderr, "can't get id for just inserted tag %s=%s: %s\n", tag_k, tag_v, err.Error())
+                            return
+                        }
                     }
                 }
                 _, err = statement_insert_metric.Exec(str)
                 if err != nil {
-                    fmt.Fprintf(os.Stderr, "db insert failed\n")
+                    fmt.Fprintf(os.Stderr, "can't store metric:%s\n", err.Error())
                     return
                 }
                 for _, tag_id := range tag_ids {
                     _, err = statement_insert_link.Exec(str, tag_id)
                     if err != nil {
-                        fmt.Fprintf(os.Stderr, "db insert failed\n")
+                        fmt.Fprintf(os.Stderr, "can't link metric to tag:%s\n", err.Error())
                         return
                     }
                 }
