@@ -63,9 +63,7 @@ func main() {
 
 	for {
 		conn_in, err := listener.Accept()
-		if err != nil {
-			continue
-		}
+		dieIfError(err)
 		handleClient(conn_in, conn_out, db, statement_insert_tag, statement_select_tag, statement_insert_metric, statement_insert_link)
 		conn_in.Close()
 	}
