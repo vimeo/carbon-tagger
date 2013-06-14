@@ -20,14 +20,15 @@ func dieIfError(err error) {
 
 func main() {
     var (
-        user     = config.String("mysql.user",     "carbon_tagger")
-        password = config.String("mysql.password", "carbon_tagger_pw")
-        address  = config.String("mysql.address",  "undefined")
-        dbname   = config.String("mysql.dbname",   "carbon_tagger")
+        mysql_user     = config.String("mysql.user",     "carbon_tagger")
+        mysql_password = config.String("mysql.password", "carbon_tagger_pw")
+        mysql_address  = config.String("mysql.address",  "undefined")
+        mysql_dbname   = config.String("mysql.dbname",   "carbon_tagger")
+        listen_port    = config.Int("listen.port", 2003)
     )
     err := config.Parse("carbon-tagger.conf")
     dieIfError(err)
-    dsn := fmt.Sprintf("%s:%s@%s/%s?charset=utf8", *user, *password, *address, *dbname)
+    dsn := fmt.Sprintf("%s:%s@%s/%s?charset=utf8", *mysql_user, *mysql_password, *mysql_address, *mysql_dbname)
 
     // connect to database to store tags
     db, err := sql.Open("mysql", dsn)
@@ -46,7 +47,7 @@ func main() {
     dieIfError(err)
    
     // listen for incoming metrics
-	service := ":2003"
+	service := fmt.Sprintf(":%d", *listen_port)
 	addr, err := net.ResolveTCPAddr("tcp4", service)
 	dieIfError(err)
 	listener, err := net.ListenTCP("tcp", addr)
