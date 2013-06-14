@@ -8,6 +8,7 @@ import (
     "errors"
     "database/sql"
     "github.com/go-sql-driver/mysql"
+    "github.com/stvp/go-toml-config"
 )
 
 func dieIfError(err error) {
@@ -18,9 +19,18 @@ func dieIfError(err error) {
 }
 
 func main() {
+    var (
+        user     = config.String("mysql.user",     "carbon_tagger")
+        password = config.String("mysql.password", "carbon_tagger_pw")
+        address  = config.String("mysql.address",  "undefined")
+        dbname   = config.String("mysql.dbname",   "carbon_tagger")
+    )
+    err := config.Parse("carbon-tagger.conf")
+    dieIfError(err)
+    dsn := fmt.Sprintf("%s:%s@%s/%s?charset=utf8", *user, *password, *address, *dbname)
 
     // connect to database to store tags
-    db, err := sql.Open("mysql", "carbon_tagger:carbon_tagger_pw@tcp(graphitemachine:3306)/carbon_tagger?charset=utf8")
+    db, err := sql.Open("mysql", dsn)
     dieIfError(err)
     defer db.Close()
     // Open doesn't open a connection. Validate DSN data:
