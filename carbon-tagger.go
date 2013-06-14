@@ -24,7 +24,9 @@ func main() {
         mysql_password = config.String("mysql.password", "carbon_tagger_pw")
         mysql_address  = config.String("mysql.address",  "undefined")
         mysql_dbname   = config.String("mysql.dbname",   "carbon_tagger")
-        listen_port    = config.Int("listen.port", 2003)
+        in_port        = config.Int("in.port", 2005)
+        out_host       = config.String("out.host", "localhost")
+        out_port       = config.Int("out.port", 2003)
     )
     err := config.Parse("carbon-tagger.conf")
     dieIfError(err)
@@ -47,20 +49,23 @@ func main() {
     dieIfError(err)
    
     // listen for incoming metrics
-	service := fmt.Sprintf(":%d", *listen_port)
+	service := fmt.Sprintf(":%d", *in_port)
 	addr, err := net.ResolveTCPAddr("tcp4", service)
 	dieIfError(err)
 	listener, err := net.ListenTCP("tcp", addr)
 	dieIfError(err)
 
-    // TODO connect to outgoing carbon-relay or carbon-cache
+    // connect to outgoing carbon daemon (carbon-relay, carbon-cache, ..)
+    out := fmt.Sprintf ("%s:%d", *out_host, *out_port)
+    conn_out, err := net.Dial("tcp", out)
+    dieIfError(err)
 
 	for {
 		conn_in, err := listener.Accept()
 		if err != nil {
 			continue
 		}
-		handleClient(conn_in, db, statement_insert_tag, statement_select_tag, statement_insert_metric, statement_insert_link)
+		handleClient(conn_in, conn_out, db, statement_insert_tag, statement_select_tag, statement_insert_metric, statement_insert_link)
 		conn_in.Close()
 	}
 }
@@ -98,15 +103,12 @@ func parseTagBasedMetric(metric string) (metric_id string, tags map[string]strin
 }
 
 
-func forwardMetric(metric string) {
-    // forward
-    //_, err2 := conn_out.Write(buf[0:n])
-    //if err2 != nil {
-    //    return
-   // }
+func forwardPacket(conn_out net.Conn, b []byte) {
+    _, err := conn_out.Write(b)
+    dieIfError(err) // todo something more sensible
 }
 
-func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, statement_select_tag *sql.Stmt, statement_insert_metric *sql.Stmt, statement_insert_link *sql.Stmt) {
+func handleClient(conn_in net.Conn, conn_out net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, statement_select_tag *sql.Stmt, statement_insert_metric *sql.Stmt, statement_insert_link *sql.Stmt) {
 	var buf [512]byte
 	for {
 		bytes, err := conn_in.Read(buf[0:])
@@ -167,11 +169,11 @@ func handleClient(conn_in net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, 
                         }
                     }
                 }
-                forwardMetric(str)
+                forwardPacket(conn_out, buf[0:bytes])
             }
         } else {
             fmt.Printf("DEBUG: not tag based, forwarding metric %s\n", strings.TrimSpace(str))
-            forwardMetric(str)
+            forwardPacket(conn_out, buf[0:bytes])
         }
 	}
 }
