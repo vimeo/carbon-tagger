@@ -54,6 +54,7 @@ func main() {
 	dieIfError(err)
 	listener, err := net.ListenTCP("tcp", addr)
 	dieIfError(err)
+	defer listener.Close()
 
 	// connect to outgoing carbon daemon (carbon-relay, carbon-cache, ..)
 	// TODO implement fwd'ing, toggle on/off
@@ -62,10 +63,12 @@ func main() {
 	dieIfError(err)
 
 	for {
+		fmt.Println("ready to accept")
 		conn_in, err := listener.Accept()
+		fmt.Println("accepted")
 		dieIfError(err)
-		handleClient(conn_in, conn_out, db, statement_insert_tag, statement_select_tag, statement_insert_metric, statement_insert_link)
-		conn_in.Close()
+		fmt.Println("handling connection in subroutine")
+		go handleClient(conn_in, conn_out, db, statement_insert_tag, statement_select_tag, statement_insert_metric, statement_insert_link)
 	}
 }
 
@@ -102,14 +105,21 @@ func parseTagBasedMetric(metric string) (metric_id string, tags map[string]strin
 }
 
 func forwardPacket(conn_out net.Conn, b []byte) {
+	fmt.Println("be4 conn out write", string(b))
 	_, err := conn_out.Write(b)
+	fmt.Println("after conn out write")
 	dieIfError(err) // todo something more sensible
 }
 
 func handleClient(conn_in net.Conn, conn_out net.Conn, db *sql.DB, statement_insert_tag *sql.Stmt, statement_select_tag *sql.Stmt, statement_insert_metric *sql.Stmt, statement_insert_link *sql.Stmt) {
+	//    defer conn_in.Close()
+	fmt.Println("handleClient begin")
 	var buf [512]byte
 	for {
+		fmt.Println("ready to read")
 		bytes, err := conn_in.Read(buf[0:])
+		fmt.Println("read data")
+		fmt.Println(string(buf[0:]), bytes, err)
 		if err != nil {
 			return
 		}
@@ -174,4 +184,7 @@ func handleClient(conn_in net.Conn, conn_out net.Conn, db *sql.DB, statement_ins
 			forwardPacket(conn_out, buf[0:bytes])
 		}
 	}
+	fmt.Println("handleClient ending.. closing conn_in")
+	conn_in.Close()
+	fmt.Println("handleClient ended")
 }
