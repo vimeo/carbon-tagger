@@ -56,6 +56,10 @@ ideally, dashboards leverage the tag database, like [graph-explorer](http://vime
 * aggregators like statsd will need to be extended for the extended protocol.  The added bonus here is that things actually become simpler:
 we can do away with all the prefix/suffix/namespacing hacks as that all becomes moot!
 
+# why do you process the same metrics every time they are submitted?
+
+to have a realtime database. you could get all metricnames and process them offline, which lowers resource usage but has higher delays
+
 # installation
 
 * if you already have a working Go setup, adjust accordingly:
