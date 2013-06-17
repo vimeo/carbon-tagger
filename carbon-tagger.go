@@ -20,17 +20,21 @@ func dieIfError(err error) {
 
 func main() {
 	var (
-		mysql_user     = config.String("mysql.user", "carbon_tagger")
-		mysql_password = config.String("mysql.password", "carbon_tagger_pw")
-		mysql_address  = config.String("mysql.address", "undefined")
-		mysql_dbname   = config.String("mysql.dbname", "carbon_tagger")
-		in_port        = config.Int("in.port", 2005)
-		out_host       = config.String("out.host", "localhost")
-		out_port       = config.Int("out.port", 2003)
+		mysql_user              = config.String("mysql.user", "carbon_tagger")
+		mysql_password          = config.String("mysql.password", "carbon_tagger_pw")
+		mysql_address           = config.String("mysql.address", "undefined")
+		mysql_dbname            = config.String("mysql.dbname", "carbon_tagger")
+		in_port                 = config.Int("in.port", 2005)
+		out_host                = config.String("out.host", "localhost")
+		out_port                = config.Int("out.port", 2003)
+		instance_id             = config.String("instance.id", "myhost")
+		instance_flush_interval = config.Int("instance.flush_interval", 60)
 	)
 	err := config.Parse("carbon-tagger.conf")
 	dieIfError(err)
 	dsn := fmt.Sprintf("%s:%s@%s/%s?charset=utf8", *mysql_user, *mysql_password, *mysql_address, *mysql_dbname)
+	fmt.Println(instance_id) // will be used later for internal metrics
+	fmt.Println(instance_flush_interval)
 
 	// connect to database to store tags
 	db, err := sql.Open("mysql", dsn)
