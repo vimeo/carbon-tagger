@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stvp/go-toml-config"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -41,15 +42,6 @@ func main() {
 	fmt.Println(instance_id) // will be used later for internal metrics
 	fmt.Println(instance_flush_interval)
 
-	// connect to database to store tags
-	db, err := sql.Open("mysql", dsn)
-	dieIfError(err)
-	defer db.Close()
-	// Open doesn't open a connection. Validate DSN data:
-	err = db.Ping()
-	db.SetMaxIdleConns(80)
-	dieIfError(err)
-
 	// listen for incoming metrics
 	service := fmt.Sprintf(":%d", *in_port)
 	addr, err := net.ResolveTCPAddr("tcp4", service)
@@ -69,8 +61,7 @@ func main() {
 	go forwardPackets(conn_out, packets_to_forward)
 
 	metrics_to_track := make(chan metricSpec)
-	// for now, only 1 sql persist worker...
-	go trackMetrics(db, metrics_to_track)
+	go trackMetrics(dsn, metrics_to_track)
 
 	for {
 		fmt.Println("ready to accept")
@@ -112,26 +103,36 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 	return metricSpec{metric_id, tags}, nil
 }
 
-func trackMetrics(db *sql.DB, metrics_to_track chan metricSpec) {
-	statement_insert_tag, err := db.Prepare("INSERT INTO tags (tag_key, tag_val) VALUES( ?, ? )")
-	dieIfError(err)
-	statement_select_tag, err := db.Prepare("SELECT tag_id FROM tags WHERE tag_key=? AND tag_val=?")
-	dieIfError(err)
-	statement_insert_metric, err := db.Prepare("INSERT INTO metrics VALUES( ? )")
-	dieIfError(err)
-	statement_insert_link, err := db.Prepare("INSERT INTO metrics_tags VALUES( ?, ? )")
-	dieIfError(err)
+func trackMetrics(dsn string, metrics_to_track chan metricSpec) {
+	//statement_insert_tag, err := db.Prepare("INSERT INTO tags (tag_key, tag_val) VALUES( ?, ? )")
+	query_insert_tag := "INSERT INTO tags (tag_key, tag_val) VALUES( ?, ? )"
+	//dieIfError(err)
+	//statement_select_tag, err := db.Prepare("SELECT tag_id FROM tags WHERE tag_key=? AND tag_val=?")
+	query_select_tag := "SELECT tag_id FROM tags WHERE tag_key=? AND tag_val=?"
+	//dieIfError(err)
+	//statement_insert_metric, err := db.Prepare("INSERT INTO metrics VALUES( ? )")
+	query_insert_metric := "INSERT INTO metrics VALUES( ? )"
+	//dieIfError(err)
+	//statement_insert_link, err := db.Prepare("INSERT INTO metrics_tags VALUES( ?, ? )")
+	query_insert_link := "INSERT INTO metrics_tags VALUES( ?, ? )"
+	//dieIfError(err)
 	for {
 		metric := <-metrics_to_track
+		// connect to database to store tags
+		db, err := sql.Open("mysql", dsn)
+		dieIfError(err)
+        db.SetMaxIdleConns(1)
 		// TODO this should go in a transaction. for now we first store all tag_k=tag_v pairs (if they are orphans, it's not so bad)
 		// then add the metric, than the coupling between metric and tags. <-- all this should def. be in a transaction
 		tag_ids := make([]int64, 0) //maybe set cap to len(tags) or so
 		for tag_k, tag_v := range metric.tags {
-			res, err := statement_insert_tag.Exec(tag_k, tag_v)
+			//res, err := statement_insert_tag.Exec(tag_k, tag_v)
+			res, err := db.Exec(query_insert_tag, tag_k, tag_v)
 			if err != nil {
 				if err.(*mysql.MySQLError).Number == 1062 { // Error 1062: Duplicate entry
 					var id int64
-					err := statement_select_tag.QueryRow(tag_k, tag_v).Scan(&id)
+					//err := statement_select_tag.QueryRow(tag_k, tag_v).Scan(&id)
+					err := db.QueryRow(query_select_tag, tag_k, tag_v).Scan(&id)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "Can't lookup the id of tag %s=%s: %s\n", tag_k, tag_v, err.Error())
 						return
@@ -151,7 +152,8 @@ func trackMetrics(db *sql.DB, metrics_to_track chan metricSpec) {
 				}
 			}
 		}
-		_, err = statement_insert_metric.Exec(metric.metric_id)
+		//_, err = statement_insert_metric.Exec(metric.metric_id)
+		_, err = db.Exec(query_insert_metric, metric.metric_id)
 		if err != nil {
 			if err.(*mysql.MySQLError).Number != 1062 { // Error 1062: Duplicate entry 'unit=f.b=aeu' for key 'PRIMARY'
 				fmt.Fprintf(os.Stderr, "can't store metric %s:%s\n", metric.metric_id, err.Error())
@@ -161,15 +163,16 @@ func trackMetrics(db *sql.DB, metrics_to_track chan metricSpec) {
 			// the metric is newly inserted.. we still have to couple it to the tags.
 			// so we assume if the metric already existed, we don't need to do this anymore. which is not very accurate since we don't use transactions yet
 			for _, tag_id := range tag_ids {
-				_, err = statement_insert_link.Exec(metric.metric_id, tag_id)
+				//_, err = statement_insert_link.Exec(metric.metric_id, tag_id)
+				_, err = db.Exec(query_insert_link, metric.metric_id, tag_id)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "can't link metric %s to tag:%s\n", metric.metric_id, err.Error())
 					return
 				}
 			}
 		}
+        db.Close()
 	}
-	// TODO should i close the mysql connection here? i always get lots of stale sockets to mysql :(
 }
 
 func forwardPackets(conn_out net.Conn, packets_to_forward chan []byte) {
