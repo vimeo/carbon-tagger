@@ -116,7 +116,7 @@ func main() {
 
 	fmt.Printf("carbon-tagger %s ready to serve on %d\n", *statsd_id, *in_port)
 	for {
-		// would be nice to have a metric showing highest amount of connections - every minute
+		// would be nice to have a metric showing highest amount of connections seen per interval
 		conn_in, err := listener.Accept()
 		dieIfError(err)
 		go handleClient(conn_in, metrics_to_track, lines_to_forward, stats)
@@ -246,12 +246,10 @@ func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, lines_to_f
 	stats.in_conns_current += 1
 	stats.mu.Unlock()
 	defer conn_in.Close()
-	//var buf [512]byte
 	reader := bufio.NewReader(conn_in)
 	for {
-		//TODO how will this handle multiple lines on input?
-		//bytes, err := conn_in.Read(buf[0:])
-		buf, _, err := reader.ReadLine()
+		// TODO handle isPrefix cases (means we should merge this read with the next one in a different packet, i think)
+		buf, isPrefix, err := reader.ReadLine()
 		if err != nil {
 			if err != io.EOF {
 				fmt.Printf("error closed uncleanly/broken: %s\n", err.Error())
@@ -263,6 +261,9 @@ func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, lines_to_f
 			stats.in_conns_current -= 1
 			stats.mu.Unlock()
 			return
+		}
+		if isPrefix {
+			fmt.Println("WARN incomplete read, possible neglected metric:", buf)
 		}
 		str := string(buf)
 		if strings.ContainsAny(str, "=") {
