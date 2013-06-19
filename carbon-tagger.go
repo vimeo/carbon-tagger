@@ -1,14 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/cactus/go-statsd-client/statsd"
 	"github.com/go-sql-driver/mysql"
 	"github.com/stvp/go-toml-config"
+	"io"
 	"net"
 	"os"
 	"strings"
+	"sync"
+	"time"
 )
 
 func dieIfError(err error) {
@@ -23,23 +28,37 @@ type metricSpec struct {
 	tags      map[string]string
 }
 
+type Stats struct {
+	mu                           sync.Mutex
+	in_conns_current             int
+	in_conns_broken_total        int64
+	in_metrics_proto2_bad_total  int64
+	in_metrics_proto2_good_total int64
+	in_metrics_proto1_total      int64
+	already_tracked              map[string]bool
+}
+
+func NewStats() *Stats {
+	return &Stats{already_tracked: make(map[string]bool)}
+}
+
 func main() {
 	var (
-		mysql_user              = config.String("mysql.user", "carbon_tagger")
-		mysql_password          = config.String("mysql.password", "carbon_tagger_pw")
-		mysql_address           = config.String("mysql.address", "undefined")
-		mysql_dbname            = config.String("mysql.dbname", "carbon_tagger")
-		in_port                 = config.Int("in.port", 2005)
-		out_host                = config.String("out.host", "localhost")
-		out_port                = config.Int("out.port", 2003)
-		instance_id             = config.String("instance.id", "myhost")
-		instance_flush_interval = config.Int("instance.flush_interval", 60)
+		mysql_user            = config.String("mysql.user", "carbon_tagger")
+		mysql_password        = config.String("mysql.password", "carbon_tagger_pw")
+		mysql_address         = config.String("mysql.address", "undefined")
+		mysql_dbname          = config.String("mysql.dbname", "carbon_tagger")
+		mysql_max_pending     = config.Int("mysql.max_pending", 1000000)
+		in_port               = config.Int("in.port", 2005)
+		out_host              = config.String("out.host", "localhost")
+		out_port              = config.Int("out.port", 2003)
+		statsd_address        = config.String("statsd.address", "localhost:8125")
+		statsd_id             = config.String("statsd.id", "myhost")
+		statsd_flush_interval = config.Int("statsd.flush_interval", 2003)
 	)
 	err := config.Parse("carbon-tagger.conf")
 	dieIfError(err)
 	dsn := fmt.Sprintf("%s:%s@%s/%s?charset=utf8", *mysql_user, *mysql_password, *mysql_address, *mysql_dbname)
-	fmt.Println(instance_id) // will be used later for internal metrics
-	fmt.Println(instance_flush_interval)
 
 	// connect to database to store tags
 	db, err := sql.Open("mysql", dsn)
@@ -51,8 +70,7 @@ func main() {
 	dieIfError(err)
 
 	// listen for incoming metrics
-	service := fmt.Sprintf(":%d", *in_port)
-	addr, err := net.ResolveTCPAddr("tcp4", service)
+	addr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf(":%d", *in_port))
 	dieIfError(err)
 	listener, err := net.ListenTCP("tcp", addr)
 	dieIfError(err)
@@ -60,24 +78,48 @@ func main() {
 
 	// connect to outgoing carbon daemon (carbon-relay, carbon-cache, ..)
 	// TODO implement fwd'ing, toggle on/off
-	out := fmt.Sprintf("%s:%d", *out_host, *out_port)
-	conn_out, err := net.Dial("tcp", out)
+	conn_out, err := net.Dial("tcp", fmt.Sprintf("%s:%d", *out_host, *out_port))
 	dieIfError(err)
 
-	packets_to_forward := make(chan []byte)
+	// we can queue up to max_pending: if more than that are pending flush to mysql, start blocking..
+	metrics_to_track := make(chan metricSpec, *mysql_max_pending)
+
+	// statsd client
+	s, err := statsd.Dial(*statsd_address, fmt.Sprintf("carbon-tagger.%s", *statsd_id))
+	dieIfError(err)
+	defer s.Close()
+
+	stats := NewStats()
+
+	submitStats := func(stats *Stats, s *statsd.Client) {
+		for {
+			stats.mu.Lock()
+			s.Gauge("in.conns.current", int64(stats.in_conns_current), 1)
+			s.Gauge("in.conns.broken.total", stats.in_conns_broken_total, 1)
+			s.Gauge("in.metrics.proto2.bad.total", stats.in_metrics_proto2_bad_total, 1)
+			s.Gauge("in.metrics.proto2.good.total", stats.in_metrics_proto2_good_total, 1)
+			s.Gauge("in.metrics.proto1.total", stats.in_metrics_proto1_total, 1)
+			s.Gauge("metrics.proto2.count-pending-tracking", int64(len(metrics_to_track)), 1)
+			s.Gauge("metrics.proto2.count-already-tracked", int64(len(stats.already_tracked)), 1)
+			stats.mu.Unlock()
+			time.Sleep(time.Duration(*statsd_flush_interval) * time.Second) // todo: run the stats submissions exactly every X seconds
+		}
+	}
+	go submitStats(stats, s)
+
+	lines_to_forward := make(chan []byte)
 	// 1 forwarding worker should suffice?
-	go forwardPackets(conn_out, packets_to_forward)
+	go forwardLines(conn_out, lines_to_forward, stats, s)
 
-	metrics_to_track := make(chan metricSpec)
 	// for now, only 1 sql persist worker...
-	go trackMetrics(db, metrics_to_track)
+	go trackMetrics(db, metrics_to_track, stats)
 
+	fmt.Printf("carbon-tagger %s ready to serve on %d\n", *statsd_id, *in_port)
 	for {
-		fmt.Println("ready to accept")
+		// would be nice to have a metric showing highest amount of connections - every minute
 		conn_in, err := listener.Accept()
 		dieIfError(err)
-		fmt.Println("handling connection in subroutine")
-		go handleClient(conn_in, metrics_to_track, packets_to_forward)
+		go handleClient(conn_in, metrics_to_track, lines_to_forward, stats)
 	}
 }
 
@@ -86,7 +128,7 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 	elements := strings.Split(metric_line, " ")
 	metric_id := ""
 	if len(elements) != 3 {
-		return metricSpec{metric_id, nil}, errors.New("metric doesn't contain exactly 3 nodes")
+		return metricSpec{metric_id, nil}, errors.New(fmt.Sprintf("metric doesn't contain exactly 3 nodes: %s", metric_line))
 	}
 	metric_id = elements[0]
 	nodes := strings.Split(metric_id, ".")
@@ -112,7 +154,7 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 	return metricSpec{metric_id, tags}, nil
 }
 
-func trackMetrics(db *sql.DB, metrics_to_track chan metricSpec) {
+func trackMetrics(db *sql.DB, metrics_to_track chan metricSpec, stats *Stats) {
 	statement_insert_tag, err := db.Prepare("INSERT INTO tags (tag_key, tag_val) VALUES( ?, ? )")
 	dieIfError(err)
 	statement_select_tag, err := db.Prepare("SELECT tag_id FROM tags WHERE tag_key=? AND tag_val=?")
@@ -123,6 +165,13 @@ func trackMetrics(db *sql.DB, metrics_to_track chan metricSpec) {
 	dieIfError(err)
 	for {
 		metric := <-metrics_to_track
+		// this is racey but that's not so bad, processing the same metric and sending it to mysql twice is not so bad.
+		stats.mu.Lock()
+		_, ok := stats.already_tracked[metric.metric_id]
+		stats.mu.Unlock()
+		if ok {
+			continue
+		}
 		// TODO this should go in a transaction. for now we first store all tag_k=tag_v pairs (if they are orphans, it's not so bad)
 		// then add the metric, than the coupling between metric and tags. <-- all this should def. be in a transaction
 		tag_ids := make([]int64, 0) //maybe set cap to len(tags) or so
@@ -168,45 +217,76 @@ func trackMetrics(db *sql.DB, metrics_to_track chan metricSpec) {
 				}
 			}
 		}
+		stats.mu.Lock()
+		stats.already_tracked[metric.metric_id] = true
+		stats.mu.Unlock()
 	}
-	// TODO should i close the mysql connection here? i always get lots of stale sockets to mysql :(
 }
 
-func forwardPackets(conn_out net.Conn, packets_to_forward chan []byte) {
+func forwardLines(conn_out net.Conn, lines_to_forward chan []byte, stats *Stats, s *statsd.Client) {
+	out_lines_error := int64(0)
+	out_lines_ok := int64(0)
 	for {
-		packet := <-packets_to_forward
-		fmt.Println("forwarding packet.....maybe..")
-		_, err := conn_out.Write(packet)
-		dieIfError(err) // todo something more sensible
-		fmt.Println("packet forwarded successfully")
+		line := <-lines_to_forward
+		fmt.Println(string(line))
+		_, err := conn_out.Write(line)
+		//_, err := fmt.Fprintln(conn_out, line)
+		if err != nil {
+			out_lines_error += 1
+			s.Gauge("out.lines.error", out_lines_error, 1)
+		} else {
+			out_lines_ok += 1
+			s.Gauge("out.lines.ok", out_lines_ok, 1)
+		}
 	}
 }
 
-func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, packets_to_forward chan []byte) {
-	defer fmt.Println("handleClient ending..")
+func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, lines_to_forward chan []byte, stats *Stats) {
+	stats.mu.Lock()
+	stats.in_conns_current += 1
+	stats.mu.Unlock()
 	defer conn_in.Close()
-	var buf [512]byte
+	//var buf [512]byte
+	reader := bufio.NewReader(conn_in)
 	for {
 		//TODO how will this handle multiple lines on input?
-		bytes, err := conn_in.Read(buf[0:])
+		//bytes, err := conn_in.Read(buf[0:])
+		buf, _, err := reader.ReadLine()
 		if err != nil {
-			fmt.Printf("error reading from incoming connection")
+			if err != io.EOF {
+				fmt.Printf("error closed uncleanly/broken: %s\n", err.Error())
+				stats.mu.Lock()
+				stats.in_conns_broken_total += 1
+				stats.mu.Unlock()
+			}
+			stats.mu.Lock()
+			stats.in_conns_current -= 1
+			stats.mu.Unlock()
 			return
 		}
-		str := string(buf[0:bytes])
+		str := string(buf)
 		if strings.ContainsAny(str, "=") {
 			str = strings.TrimSpace(str)
 			metric, err := parseTagBasedMetric(str)
 			if err != nil {
-				fmt.Printf("DEBUG: invalid tag based metric, ignoring (%s)\n", err)
+				stats.mu.Lock()
+				stats.in_metrics_proto2_bad_total += 1
+				stats.mu.Unlock()
 			} else {
-				fmt.Printf("DEBUG: valid tag based metric %s, storing tags and forwarding\n", strings.TrimSpace(str))
+				stats.mu.Lock()
+				stats.in_metrics_proto2_good_total += 1
+				stats.mu.Unlock()
 				metrics_to_track <- metric
-				packets_to_forward <- buf[0:bytes]
+				lines_to_forward <- buf
 			}
 		} else {
-			fmt.Printf("DEBUG: not tag based, forwarding metric %s\n", strings.TrimSpace(str))
-			packets_to_forward <- buf[0:bytes]
+			stats.mu.Lock()
+			stats.in_metrics_proto1_total += 1
+			stats.mu.Unlock()
+			lines_to_forward <- append(buf, '\n')
 		}
 	}
+	stats.mu.Lock()
+	stats.in_conns_current -= 1
+	stats.mu.Unlock()
 }
