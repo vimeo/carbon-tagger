@@ -37,15 +37,20 @@ we can do away with all the prefix/suffix/namespacing hacks as that all becomes 
 to have a realtime database. you could get all metricnames later and process them offline, which lowers resource usage but has higher delays
 
 # performance
-currently:
+
+currently, not optimized at all! but thanks to the sql buffer this may suffice.
+
+* known metrics, or new metrics with the sql buffer not full: 3000~5500 metrics/s
+* syncing metrics to mysql (1 worker): 475metrics/s
 
 # future optimisations:
 
 * multiple sql workers
-* check for indices?
-* if metrics arealready in already_tracked, don't put them in the channel
+* sql indices?
+* if metrics are already in already_tracked, don't put them in the channel
 * populate an sql cache from disk on program start
 * infinitely sized "to track" queue that spills to disk when needed
+* something else than mysql? redis?
 
 # installation
 
