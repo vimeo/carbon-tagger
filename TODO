@@ -1,0 +1,4 @@
+* port internal stats to proto2, once statsd has proper proto2 support (or pass them along to carbon)
+  service=carbon-tagger instance=id direction=in unit=metrics/s proto=1
+  service=carbon-tagger instance=id direction=in unit=metrics/s proto=2
+  service=carbon-tagger instance=id unit=bad_metrics/s [proto=..] [error=incorrect_nodes, missing_unit, ..]
