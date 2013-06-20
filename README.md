@@ -76,15 +76,15 @@ on Centos:
 yum install mysql mysql-server
 chkconfig --levels 235 mysqld on
 mysql -u root
-> grant all privileges ON carbon_tagger.* TO 'carbon_tagger' IDENTIFIED BY 'carbon_tagger_pw';
-> create database carbon_tagger;
-> FLUSH PRIVILEGES;
+grant all privileges ON carbon_tagger.* TO 'carbon_tagger' IDENTIFIED BY 'carbon_tagger_pw';
+create database carbon_tagger;
+FLUSH PRIVILEGES;
 
 mysql -h $HOST -u carbon_tagger --password=carbon_tagger_pw
-> CREATE TABLE IF NOT EXISTS metrics (metric_id char(255) primary key);
-> CREATE TABLE IF NOT EXISTS tags (tag_id integer primary key auto_increment, tag_key char(50), tag_val char(255));
-> ALTER TABLE tags ADD CONSTRAINT UNIQUE(tag_key, tag_val); -- we rely on this! ERROR 1062 (23000): Duplicate entry 'e-c' for key 'tag_key'
-> CREATE TABLE IF NOT EXISTS metrics_tags (metric_id char(255), tag_id int);
-> ALTER TABLE metrics_tags ADD CONSTRAINT metric_id FOREIGN KEY (metric_id) references metrics(metric_id);
-> ALTER TABLE metrics_tags ADD CONSTRAINT tag_id FOREIGN KEY (tag_id) references tags(tag_id);
+CREATE TABLE IF NOT EXISTS metrics (metric_id char(255) primary key);
+CREATE TABLE IF NOT EXISTS tags (tag_id integer primary key auto_increment, tag_key char(50), tag_val char(255));
+ALTER TABLE tags ADD CONSTRAINT UNIQUE(tag_key, tag_val); -- we rely on this! ERROR 1062 (23000): Duplicate entry 'e-c' for key 'tag_key'
+CREATE TABLE IF NOT EXISTS metrics_tags (metric_id char(255), tag_id int);
+ALTER TABLE metrics_tags ADD CONSTRAINT metric_id FOREIGN KEY (metric_id) references metrics(metric_id);
+ALTER TABLE metrics_tags ADD CONSTRAINT tag_id FOREIGN KEY (tag_id) references tags(tag_id);
 ```
