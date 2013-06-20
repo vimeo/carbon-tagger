@@ -228,7 +228,6 @@ func forwardLines(conn_out net.Conn, lines_to_forward chan []byte, stats *Stats,
 	out_lines_ok := int64(0)
 	for {
 		line := <-lines_to_forward
-		fmt.Println(string(line))
 		_, err := conn_out.Write(line)
 		//_, err := fmt.Fprintln(conn_out, line)
 		if err != nil {
@@ -249,21 +248,22 @@ func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, lines_to_f
 	reader := bufio.NewReader(conn_in)
 	for {
 		// TODO handle isPrefix cases (means we should merge this read with the next one in a different packet, i think)
-		buf, isPrefix, err := reader.ReadLine()
+		buf, err := reader.ReadBytes('\n')
 		if err != nil {
 			if err != io.EOF {
-				fmt.Printf("error closed uncleanly/broken: %s\n", err.Error())
+				fmt.Printf("error closed uncleanly/broken: %s  -- line read: %s", err.Error(), string(buf))
 				stats.mu.Lock()
 				stats.in_conns_broken_total += 1
 				stats.mu.Unlock()
+			} else {
+				fmt.Printf("reached EOF. line read: %s", string(buf))
 			}
+			// todo handle incomplete eads
+			fmt.Print("WARN incomplete read, possible neglected metric. line read:", string(buf))
 			stats.mu.Lock()
 			stats.in_conns_current -= 1
 			stats.mu.Unlock()
 			return
-		}
-		if isPrefix {
-			fmt.Println("WARN incomplete read, possible neglected metric:", buf)
 		}
 		str := string(buf)
 		if strings.ContainsAny(str, "=") {
@@ -278,13 +278,13 @@ func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, lines_to_f
 				stats.in_metrics_proto2_good_total += 1
 				stats.mu.Unlock()
 				metrics_to_track <- metric
-				lines_to_forward <- append(buf, '\n')
+				lines_to_forward <- buf
 			}
 		} else {
 			stats.mu.Lock()
 			stats.in_metrics_proto1_total += 1
 			stats.mu.Unlock()
-			lines_to_forward <- append(buf, '\n')
+			lines_to_forward <- buf
 		}
 	}
 	stats.mu.Lock()
