@@ -278,7 +278,7 @@ func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, lines_to_f
 				stats.in_metrics_proto2_good_total += 1
 				stats.mu.Unlock()
 				metrics_to_track <- metric
-				lines_to_forward <- buf
+				lines_to_forward <- append(buf, '\n')
 			}
 		} else {
 			stats.mu.Lock()
