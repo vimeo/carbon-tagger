@@ -15,6 +15,8 @@ the metric_id is:
 * there must be `unit` tag (with a value like `B/s`, `packets`, `queries/m` etc)
 * there must be at least one other tag.
 * the nodes must be ordered
+* basically everything has to be lowercase except where uppercasing is sensible
+  (e.g. units and prefixes that use capitals (M, B,...), or commonly capitalized terms such as http verbs (GET/PUT)
 
 
 So this defines a metric as a set of tags, and while we're at it, it also
