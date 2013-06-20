@@ -40,10 +40,13 @@ to have a realtime database. you could get all metricnames later and process the
 
 # performance
 
-currently, not optimized at all! but thanks to the sql buffer this may suffice.
+currently, not optimized at all! but it's probably speedy enough,
+and there's a big sql buffer that smoothens the effect of new metrics
 
-* known metrics, or new metrics with the sql buffer not full: 3000~5500 metrics/s
-* syncing metrics to mysql (1 worker): 475metrics/s
+* known metrics, or new metrics with the sql buffer not full: 8000metrics/s
+* syncing metrics to mysql (1 worker): 1500 metrics/s
+
+
 
 # future optimisations:
 
