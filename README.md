@@ -53,6 +53,8 @@ currently, not optimized at all! but thanks to the sql buffer this may suffice.
 * populate an sql cache from disk on program start
 * infinitely sized "to track" queue that spills to disk when needed
 * something else than mysql? redis?
+* forward_lines channel buffering, so that runtime doesn't have to switch Gs all the time?
+* GOMAXPROCS
 
 # installation
 
