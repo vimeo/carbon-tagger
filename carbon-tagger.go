@@ -229,7 +229,6 @@ func forwardLines(conn_out net.Conn, lines_to_forward chan []byte, stats *Stats,
 	for {
 		line := <-lines_to_forward
 		_, err := conn_out.Write(line)
-		//_, err := fmt.Fprintln(conn_out, line)
 		if err != nil {
 			out_lines_error += 1
 			s.Gauge("out.lines.error", out_lines_error, 1)
