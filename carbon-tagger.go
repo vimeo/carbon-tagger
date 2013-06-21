@@ -249,16 +249,17 @@ func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, lines_to_f
 		// TODO handle isPrefix cases (means we should merge this read with the next one in a different packet, i think)
 		buf, err := reader.ReadBytes('\n')
 		if err != nil {
+			str := strings.TrimSpace(string(buf))
 			if err != io.EOF {
-				fmt.Printf("error closed uncleanly/broken: %s  -- line read: %s", err.Error(), string(buf))
+				fmt.Printf("connection closed uncleanly/broken: %s  -- line read: '%s'\n", err.Error(), str)
 				stats.mu.Lock()
 				stats.in_conns_broken_total += 1
 				stats.mu.Unlock()
 			} else {
-				fmt.Printf("reached EOF. line read: %s", string(buf))
+				fmt.Printf("reached EOF. line read: '%s'\n", str)
 			}
 			// todo handle incomplete eads
-			fmt.Print("WARN incomplete read, possible neglected metric. line read:", string(buf))
+			fmt.Printf("WARN incomplete read, possible neglected metric. line read: '%s'\n", str)
 			stats.mu.Lock()
 			stats.in_conns_current -= 1
 			stats.mu.Unlock()
