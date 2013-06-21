@@ -251,15 +251,15 @@ func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, lines_to_f
 		if err != nil {
 			str := strings.TrimSpace(string(buf))
 			if err != io.EOF {
-				fmt.Printf("connection closed uncleanly/broken: %s  -- line read: '%s'\n", err.Error(), str)
+				fmt.Printf("WARN connection closed uncleanly/broken: %s\n", err.Error())
 				stats.mu.Lock()
 				stats.in_conns_broken_total += 1
 				stats.mu.Unlock()
-			} else {
-				fmt.Printf("reached EOF. line read: '%s'\n", str)
 			}
-			// todo handle incomplete eads
-			fmt.Printf("WARN incomplete read, possible neglected metric. line read: '%s'\n", str)
+			if len(str) > 0 {
+				// todo handle incomplete reads
+				fmt.Printf("WARN incomplete read, line read: '%s'. neglecting line because connection closed because of %s\n", str, err.Error())
+			}
 			stats.mu.Lock()
 			stats.in_conns_current -= 1
 			stats.mu.Unlock()
