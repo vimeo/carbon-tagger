@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -76,11 +77,6 @@ func main() {
 	dieIfError(err)
 	defer listener.Close()
 
-	// connect to outgoing carbon daemon (carbon-relay, carbon-cache, ..)
-	// TODO implement fwd'ing, toggle on/off
-	conn_out, err := net.Dial("tcp", fmt.Sprintf("%s:%d", *out_host, *out_port))
-	dieIfError(err)
-
 	// we can queue up to max_pending: if more than that are pending flush to mysql, start blocking..
 	metrics_to_track := make(chan metricSpec, *mysql_max_pending)
 
@@ -109,7 +105,7 @@ func main() {
 
 	lines_to_forward := make(chan []byte)
 	// 1 forwarding worker should suffice?
-	go forwardLines(conn_out, lines_to_forward, stats, s)
+	go forwardLines(*out_host, *out_port, lines_to_forward, stats, s)
 
 	// for now, only 1 sql persist worker...
 	go trackMetrics(db, metrics_to_track, stats)
@@ -223,15 +219,89 @@ func trackMetrics(db *sql.DB, metrics_to_track chan metricSpec, stats *Stats) {
 	}
 }
 
-func forwardLines(conn_out net.Conn, lines_to_forward chan []byte, stats *Stats, s *statsd.Client) {
+// from https://gist.github.com/moraes/2141121
+type Node struct {
+	line []byte
+}
+
+// Queue is a basic FIFO queue based on a circular list that resizes as needed.
+type Queue struct {
+	nodes []*Node
+	size  int
+	head  int
+	tail  int
+	count int
+}
+
+// NewQueue returns a new queue with the given initial size.
+func NewQueue(size int) *Queue {
+	return &Queue{
+		nodes: make([]*Node, size),
+		size:  size,
+	}
+}
+
+// Push adds a node to the queue.
+func (q *Queue) Push(n *Node) {
+	if q.head == q.tail && q.count > 0 {
+		nodes := make([]*Node, len(q.nodes)+q.size)
+		copy(nodes, q.nodes[q.head:])
+		copy(nodes[len(q.nodes)-q.head:], q.nodes[:q.head])
+		q.head = 0
+		q.tail = len(q.nodes)
+		q.nodes = nodes
+	}
+	q.nodes[q.tail] = n
+	q.tail = (q.tail + 1) % len(q.nodes)
+	q.count++
+}
+
+// Pop removes and returns a node from the queue in first to last order.
+func (q *Queue) Pop() *Node {
+	if q.count == 0 {
+		return nil
+	}
+	node := q.nodes[q.head]
+	q.head = (q.head + 1) % len(q.nodes)
+	q.count--
+	return node
+}
+
+func forwardLines(out_host string, out_port int, lines_to_forward chan []byte, stats *Stats, s *statsd.Client) {
+	// connect to outgoing carbon daemon (carbon-relay, carbon-cache, ..)
+	conn_out, err := net.Dial("tcp", fmt.Sprintf("%s:%d", out_host, out_port))
+	dieIfError(err)
+	lines_to_retry := NewQueue(100)
+
 	out_lines_error := int64(0)
 	out_lines_ok := int64(0)
+	var line []byte
 	for {
-		line := <-lines_to_forward
+		if lines_to_retry.count > 0 {
+			// copy needed?
+			copy(line, lines_to_retry.Pop().line)
+		} else {
+			line = <-lines_to_forward
+		}
 		_, err := conn_out.Write(line)
 		if err != nil {
-			out_lines_error += 1
-			s.Gauge("out.lines.error", out_lines_error, 1)
+			// asert err.(*net.OpError) without panicking?
+			if err.(*net.OpError).Err == syscall.EPIPE {
+				// TODO for now this just blocks.. later we'll want lines_to_retry to become a real FIFO and don't block input
+				// (upto a certain max size).  then, instrument how long the recovery takes (in time and in requeued lines)
+				fmt.Fprintf(os.Stderr, "broken pipe to %s:%d. reconnecting..\n", out_host, out_port)
+				conn_out, err = net.Dial("tcp", fmt.Sprintf("%s:%d", out_host, out_port))
+				for err != nil && err.(*net.OpError).Err == syscall.ECONNREFUSED {
+					fmt.Fprintf(os.Stderr, "conn refused @ %s:%d. reconnecting..\n", out_host, out_port)
+					time.Sleep(500 * time.Millisecond)
+					conn_out, err = net.Dial("tcp", fmt.Sprintf("%s:%d", out_host, out_port))
+				}
+				fmt.Fprintf(os.Stderr, "reconnected to %s:%d.\n", out_host, out_port)
+				lines_to_retry.Push(&Node{line})
+			} else {
+				out_lines_error += 1
+				s.Gauge("out.lines.error", out_lines_error, 1)
+			}
 		} else {
 			out_lines_ok += 1
 			s.Gauge("out.lines.ok", out_lines_ok, 1)
