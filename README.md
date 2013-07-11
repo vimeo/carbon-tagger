@@ -45,6 +45,7 @@ and there's a big sql buffer that smoothens the effect of new metrics
 
 * known metrics, or new metrics with the sql buffer not full: 8000metrics/s
 * syncing metrics to mysql (1 worker): 1500 metrics/s
+* space used: 3.5kB/metric (441MB for 126304 metrics)
 
 
 
