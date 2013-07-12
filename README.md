@@ -40,25 +40,30 @@ to have a realtime database. you could get all metricnames later and process the
 
 # performance
 
-currently, not optimized at all! but it's probably speedy enough,
-and there's a big sql buffer that smoothens the effect of new metrics
+currently, not very optimized at all! but it's probably speedy enough,
+and there's a big buffer that smoothens the effect of new metrics
 
-* known metrics, or new metrics with the sql buffer not full: 8000metrics/s
-* syncing metrics to mysql (1 worker): 1500 metrics/s
-* space used: 3.5kB/metric (441MB for 126304 metrics)
+* I reach about 15k metrics/s processing speed, even when the temp buffer is full and it's syncing to ES.
+in fact, i don't see a discernable difference between buffer full (unblocked) and buffer full (blocked)
+* space used: 176B/metric (21M for 125k metrics, twice that if we'd enable indexing/analyzing)
 
+# TODO
+* make sure the bulk thing uses 'create' and doesn't update/replace the doc every time
+* it seems like ES doesn't contain _all_ metrics (on 2M unique inserts, ES' count is 1889300)
+* better mapping, _source, type analyzing?
 
+# future optimisations
 
-# future optimisations:
-
-* multiple sql workers
-* sql indices?
 * if metrics are already in already_tracked, don't put them in the channel
-* populate an sql cache from disk on program start
+* populate an ES cache from disk on program start
 * infinitely sized "to track" queue that spills to disk when needed
-* something else than mysql? redis?
 * forward_lines channel buffering, so that runtime doesn't have to switch Gs all the time?
 * GOMAXPROCS
+
+if/when ES performance becomes an issue, consider:
+* edge-ngrams/reverse edge-ngrams to do it at index time
+* use prefix match with regular/reverse fields
+* query_string maybe
 
 # building
 
@@ -71,25 +76,8 @@ go get github.com/Vimeo/carbon-tagger
 ```
 # installation
 
+* just copy the carbon-tagger binary and run it (TODO: initscripts)
+* install elasticsearch and run it (super easy, see http://www.elasticsearch.org/guide/reference/setup/installation/, just set a unique cluster name)
+* ./recreate_index.sh
 
-* install a database and create the tables, I test using mysql. but it should be trivial to support others.
 
-on Centos:
-```
-yum install mysql mysql-server
-chkconfig --levels 235 mysqld on
-/etc/init.d/mysqld start
-mysql -u root
-grant all privileges ON carbon_tagger.* TO 'carbon_tagger' IDENTIFIED BY 'carbon_tagger_pw';
-create database carbon_tagger;
-FLUSH PRIVILEGES;
-
-mysql -h $HOST -u carbon_tagger --password=carbon_tagger_pw
-use carbon_tagger;
-CREATE TABLE IF NOT EXISTS metrics (metric_id char(255) primary key);
-CREATE TABLE IF NOT EXISTS tags (tag_id integer primary key auto_increment, tag_key char(50), tag_val char(255));
-ALTER TABLE tags ADD CONSTRAINT UNIQUE(tag_key, tag_val); -- we rely on this! ERROR 1062 (23000): Duplicate entry 'e-c' for key 'tag_key'
-CREATE TABLE IF NOT EXISTS metrics_tags (metric_id char(255), tag_id int);
-ALTER TABLE metrics_tags ADD CONSTRAINT metric_id FOREIGN KEY (metric_id) references metrics(metric_id);
-ALTER TABLE metrics_tags ADD CONSTRAINT tag_id FOREIGN KEY (tag_id) references tags(tag_id);
-```

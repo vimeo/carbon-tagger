@@ -1,5 +1,6 @@
-host="es_machine"
-port=9202
+#!/bin/bash
+host=$(grep -A3 elasticsearch carbon-tagger.conf | sed -n 's/^host = "\(.*\)"/\1/p')
+port=$(grep -A3 elasticsearch carbon-tagger.conf | sed -n 's/^port = \(.*\)/\1/p')
 index=graphite_metrics
 
 echo "delete any existing index (maybe)"

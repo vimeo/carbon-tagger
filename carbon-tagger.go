@@ -2,15 +2,16 @@ package main
 
 import (
 	"bufio"
-	"database/sql"
 	"errors"
 	"fmt"
 	"github.com/cactus/go-statsd-client/statsd"
-	"github.com/go-sql-driver/mysql"
+	"github.com/mattbaird/elastigo/api"
+	"github.com/mattbaird/elastigo/core"
 	"github.com/stvp/go-toml-config"
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,6 +28,9 @@ func dieIfError(err error) {
 type metricSpec struct {
 	metric_id string
 	tags      map[string]string
+}
+type MetricEs struct {
+	Tags []string `json:"tags"`
 }
 
 type Stats struct {
@@ -45,11 +49,9 @@ func NewStats() *Stats {
 
 func main() {
 	var (
-		mysql_user            = config.String("mysql.user", "carbon_tagger")
-		mysql_password        = config.String("mysql.password", "carbon_tagger_pw")
-		mysql_address         = config.String("mysql.address", "undefined")
-		mysql_dbname          = config.String("mysql.dbname", "carbon_tagger")
-		mysql_max_pending     = config.Int("mysql.max_pending", 1000000)
+		es_host               = config.String("elasticsearch.host", "undefined")
+		es_port               = config.Int("elasticsearch.port", 9200)
+		es_max_pending        = config.Int("elasticsearch.max_pending", 1000000)
 		in_port               = config.Int("in.port", 2005)
 		out_host              = config.String("out.host", "localhost")
 		out_port              = config.Int("out.port", 2003)
@@ -59,16 +61,12 @@ func main() {
 	)
 	err := config.Parse("carbon-tagger.conf")
 	dieIfError(err)
-	dsn := fmt.Sprintf("%s:%s@%s/%s?charset=utf8", *mysql_user, *mysql_password, *mysql_address, *mysql_dbname)
 
-	// connect to database to store tags
-	db, err := sql.Open("mysql", dsn)
-	dieIfError(err)
-	defer db.Close()
-	// Open doesn't open a connection. Validate DSN data:
-	err = db.Ping()
-	db.SetMaxIdleConns(80)
-	dieIfError(err)
+	// connect to elasticsearch database to store tags
+	api.Domain = *es_host
+	api.Port = strconv.Itoa(*es_port)
+	done := make(chan bool)
+	core.BulkIndexorGlobalRun(4, done)
 
 	// listen for incoming metrics
 	addr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf(":%d", *in_port))
@@ -77,8 +75,8 @@ func main() {
 	dieIfError(err)
 	defer listener.Close()
 
-	// we can queue up to max_pending: if more than that are pending flush to mysql, start blocking..
-	metrics_to_track := make(chan metricSpec, *mysql_max_pending)
+	// we can queue up to max_pending: if more than that are pending flush to ES, start blocking..
+	metrics_to_track := make(chan metricSpec, *es_max_pending)
 
 	// statsd client
 	s, err := statsd.Dial(*statsd_address, fmt.Sprintf("carbon-tagger.%s", *statsd_id))
@@ -107,8 +105,8 @@ func main() {
 	// 1 forwarding worker should suffice?
 	go forwardLines(*out_host, *out_port, lines_to_forward, stats, s)
 
-	// for now, only 1 sql persist worker...
-	go trackMetrics(db, metrics_to_track, stats)
+	// 1 worker, but ES library has multiple workers
+	go trackMetrics(metrics_to_track, stats)
 
 	fmt.Printf("carbon-tagger %s ready to serve on %d\n", *statsd_id, *in_port)
 	for {
@@ -150,69 +148,31 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 	return metricSpec{metric_id, tags}, nil
 }
 
-func trackMetrics(db *sql.DB, metrics_to_track chan metricSpec, stats *Stats) {
-	statement_insert_tag, err := db.Prepare("INSERT INTO tags (tag_key, tag_val) VALUES( ?, ? )")
-	dieIfError(err)
-	statement_select_tag, err := db.Prepare("SELECT tag_id FROM tags WHERE tag_key=? AND tag_val=?")
-	dieIfError(err)
-	statement_insert_metric, err := db.Prepare("INSERT INTO metrics VALUES( ? )")
-	dieIfError(err)
-	statement_insert_link, err := db.Prepare("INSERT INTO metrics_tags VALUES( ?, ? )")
-	dieIfError(err)
+func trackMetrics(metrics_to_track chan metricSpec, stats *Stats) {
+	// this could be more efficient in two ways:
+	// don't append (expensive resize)
+	// don't keep creating a new one for every metric, reuse same datastructure
+	// we could for example keep an array with like 100 slots (no metric will ever reach that much) and fill the array from 0 upwards,
+	// and then just create a slice pointing to the last inserted item.
+	tags := make([]string, 0)
 	for {
 		metric := <-metrics_to_track
-		// this is racey but that's not so bad, processing the same metric and sending it to mysql twice is not so bad.
+		// this is racey but that's not so bad, processing the same metric and sending it to ES twice is not so bad.
 		stats.mu.Lock()
 		_, ok := stats.already_tracked[metric.metric_id]
 		stats.mu.Unlock()
 		if ok {
 			continue
 		}
-		// TODO this should go in a transaction. for now we first store all tag_k=tag_v pairs (if they are orphans, it's not so bad)
-		// then add the metric, than the coupling between metric and tags. <-- all this should def. be in a transaction
-		tag_ids := make([]int64, 0) //maybe set cap to len(tags) or so
-		for tag_k, tag_v := range metric.tags {
-			res, err := statement_insert_tag.Exec(tag_k, tag_v)
-			if err != nil {
-				if err.(*mysql.MySQLError).Number == 1062 { // Error 1062: Duplicate entry
-					var id int64
-					err := statement_select_tag.QueryRow(tag_k, tag_v).Scan(&id)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Can't lookup the id of tag %s=%s: %s\n", tag_k, tag_v, err.Error())
-						return
-					}
-					tag_ids = append(tag_ids, id)
-				} else {
-					fmt.Fprintf(os.Stderr, "can't store tag %s=%s: %s\n", tag_k, tag_v, err.Error())
-					return
-				}
-			} else {
-				id, err := res.LastInsertId()
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "can't get id for just inserted tag %s=%s: %s\n", tag_k, tag_v, err.Error())
-					return
-				} else {
-					tag_ids = append(tag_ids, id)
-				}
-			}
+		date := time.Now()
+		for tag_key, tag_val := range metric.tags {
+			tags = append(tags, fmt.Sprintf("%s=%s", tag_key, tag_val))
 		}
-		_, err = statement_insert_metric.Exec(metric.metric_id)
-		if err != nil {
-			if err.(*mysql.MySQLError).Number != 1062 { // Error 1062: Duplicate entry 'unit=f.b=aeu' for key 'PRIMARY'
-				fmt.Fprintf(os.Stderr, "can't store metric %s:%s\n", metric.metric_id, err.Error())
-				return
-			}
-		} else {
-			// the metric is newly inserted.. we still have to couple it to the tags.
-			// so we assume if the metric already existed, we don't need to do this anymore. which is not very accurate since we don't use transactions yet
-			for _, tag_id := range tag_ids {
-				_, err = statement_insert_link.Exec(metric.metric_id, tag_id)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "can't link metric %s to tag:%s\n", metric.metric_id, err.Error())
-					return
-				}
-			}
-		}
+		metric_es := MetricEs{tags}
+		//fmt.Printf("saving metric %s - %s", metric.metric_id, metric_es)
+		err := core.IndexBulk("graphite_metrics", "metric", metric.metric_id, &date, &metric_es)
+		dieIfError(err)
+		tags = make([]string, 0)
 		stats.mu.Lock()
 		stats.already_tracked[metric.metric_id] = true
 		stats.mu.Unlock()
