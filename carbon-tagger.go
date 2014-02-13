@@ -127,17 +127,18 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 	metric_id = elements[0]
 	nodes := strings.Split(metric_id, ".")
 	tags := make(map[string]string)
-	// TODO make sure incoming tags are sorted
-	for _, node := range nodes {
+	for i, node := range nodes {
 		tag := strings.Split(node, "=")
-		if len(tag) != 2 {
-			return metricSpec{metric_id, nil}, errors.New("bad metric spec: each node must be a 'tag_k=tag_v' pair")
-		}
-		if tag[0] == "" || tag[1] == "" {
+		if len(tag) > 2 {
+			return metricSpec{metric_id, nil}, errors.New("bad metric spec: more than 1 equals sign")
+		} else if len(tag) < 2 {
+			tags[fmt.Sprintf("n%d", i+1)] = node
+		} else if tag[0] == "" || tag[1] == "" {
 			return metricSpec{metric_id, nil}, errors.New("bad metric spec: tag_k and tag_v must be non-empty strings")
+		} else {
+			// k=v format, and both are != ""
+			tags[tag[0]] = tag[1]
 		}
-
-		tags[tag[0]] = tag[1]
 	}
 	if _, ok := tags["unit"]; !ok {
 		return metricSpec{metric_id, nil}, errors.New("bad metric spec: unit tag (mandatory) not specified")

@@ -4,25 +4,25 @@ Standard graphite protocol (`proto1`)
 ```
 string.based.metric[...] value unix_timestamp
 ```
-Extended graphite protocol (backwards compatible), `proto2`:
-```
-key=val.key=val[....] value unix_timestamp
-```
-If the first field contains an "=", it is assumed to be `proto2`:  
-the metric_id is:
+"string", "based", "metric" being the nodes of the metric.
 
-* an ordered list of `key=val` tag pairs, joined by dots.
-* there must be `unit` tag (with a value like `B/s`, `packets`, `queries/m` etc)
+Extended graphite protocol (backwards compatible) extends this by stating:
+
+* nodes can be old-style values, or new-style `key=val` tag pairs
+* if there's a "=" in one or more of the nodes, we'll try to parse as `proto2` and add it to the index if below conditions are met.
+* there must be a tag pair with `unit` as tag key.
 * there must be at least one other tag.
-* the nodes must be ordered
-* basically everything has to be lowercase except where uppercasing is sensible
-  (e.g. units and prefixes that use capitals (M, B,...), or commonly capitalized terms such as http verbs (GET/PUT)
+* you can freely choose the order of the nodes for every metric, but when you change the order, you change the metric key.
+* old-style nodes (i.e. not "key=val" format) implicitly get an "nX" tag key where X is the node position in the string, starting from 1.
 
+You'll probably want to follow the [guidelines for naming metrics](https://github.com/vimeo/graph-explorer/wiki/Consistent-tag-keys-and-values) as well.
 
 So this defines a metric as a set of tags, and while we're at it, it also
 specifies the metric_id that will be used by the current carbon and related tools.
 carbon-tagger will maintain a database of metrics and their tags, and pass it on (unaltered) to a daemon
 like carbon-cache or carbon-relay. So the protocol is fully backwards compatible.
+
+This is [metrics 2.0](http://dieter.plaetinck.be/metrics_2_a_proposal.html) but using dots as delimiters until we can fix graphite.
 
 
 # how does this affect the rest of my stack?
@@ -45,6 +45,8 @@ and there's a big buffer that smoothens the effect of new metrics
 
 * I reach about 15k metrics/s processing speed, even when the temp buffer is full and it's syncing to ES.
 in fact, i don't see a discernable difference between buffer full (unblocked) and buffer full (blocked)
+probably carbon-cache (whisper) was being the bottleneck?
+
 * space used: 176B/metric (21M for 125k metrics, twice that if we'd enable indexing/analyzing)
 
 # TODO
