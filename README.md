@@ -4,9 +4,11 @@ Standard graphite protocol (`proto1`)
 ```
 string.based.metric[...] value unix_timestamp
 ```
-"string", "based", "metric" being the nodes of the metric.
+"string", "based", "metric" being the nodes of the metric, and metric names usually being unorganized, unstandardized and lacking information.
 
-Extended graphite protocol (backwards compatible) extends this by stating:
+Carbon-tagger implements [metrics 2.0](http://dieter.plaetinck.be/metrics_2_a_proposal.html) which aims to make metrics entirely self describing, structured, and standardized.
+
+It does this by using an axtended graphite protocol (backwards compatible):
 
 * nodes can be old-style values, or new-style `key=val` tag pairs
 * if there's a "=" in one or more of the nodes, we'll try to parse as `proto2` and add it to the index if below conditions are met.
@@ -15,24 +17,29 @@ Extended graphite protocol (backwards compatible) extends this by stating:
 * you can freely choose the order of the nodes for every metric, but when you change the order, you change the metric key.
 * old-style nodes (i.e. not "key=val" format) implicitly get an "nX" tag key where X is the node position in the string, starting from 1.
 
-You'll probably want to follow the [guidelines for naming metrics](https://github.com/vimeo/graph-explorer/wiki/Consistent-tag-keys-and-values) as well.
+You'll probably want to follow the [metrics naming conventions](https://github.com/vimeo/graph-explorer/wiki/Consistent-tag-keys-and-values),
+specifically [apply the correct units](https://github.com/vimeo/graph-explorer/wiki/Units-%26-Prefixes)
 
 So this defines a metric as a set of tags, and while we're at it, it also
 specifies the metric_id that will be used by the current carbon and related tools.
 carbon-tagger will maintain a database of metrics and their tags, and pass it on (unaltered) to a daemon
 like carbon-cache or carbon-relay. So the protocol is fully backwards compatible.
 
-This is [metrics 2.0](http://dieter.plaetinck.be/metrics_2_a_proposal.html) but using dots as delimiters until we can fix graphite.
+This is [metrics 2.0](http://dieter.plaetinck.be/metrics_2_a_proposal.html) but
+* using dots as delimiters until we can fix graphite.
+* you can use units like "Mbps" or "Errps" to mean "Mb/s" and "Err/s".  Graphite treats slashes as delimiters. Carbon-tagger will set the 
+  proper unit tag.
+
 
 
 # how does this affect the rest of my stack?
 
-* carbon-relay, carbon-cache: unaffected, they receive the same data as usual, they need to
-identify metrics by key and that stays the same.
-* graphite-web: the fact that new style metrics show up in the tree of the graphite composer is more of an artifact.  It's an inferior UI model that I want to phase out.
+* carbon-relay, carbon-cache: unaffected, they receive the same data as usual, the identifiers just look a little different.
+* graphite-web: unaffected. metrics 2.0 still show up in the tree of the graphite composer, although that's an inferior UI model that I want to phase out.
 ideally, dashboards leverage the tag database, like [graph-explorer](http://vimeo.github.io/graph-explorer) does.
-* aggregators like statsd will need `proto2` support.  The added bonus here is that things actually become simpler:
-we can do away with all the prefix/suffix/namespacing hacks as that all becomes moot!
+* aggregators like statsd need `proto2` support.  [statsdaemon](https://github.com/vimeo/statsdaemon) is a drop-in statsd replacement
+that for metrics in metrics2.0 format correctly represents its aggregations and statistical summaries by updating the key/value pairs of metric names, as opposed to the traditional prefix/suffix "features" which leave metrics even vaguer than they were.
+
 
 # why do you process the same metrics every time they are submitted?
 
