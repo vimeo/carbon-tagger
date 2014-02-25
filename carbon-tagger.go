@@ -141,9 +141,12 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 			tags[tag[0]] = tag[1]
 		}
 	}
-	if _, ok := tags["unit"]; !ok {
+	if u, ok := tags["unit"]; !ok {
 		return metricSpec{metric_id, nil}, errors.New("bad metric spec: unit tag (mandatory) not specified")
+	} else if strings.HasSuffix(u, "ps") {
+		tags["unit"] = u[:len(u)-2] + "/s"
 	}
+
 	if len(tags) < 2 {
 		return metricSpec{metric_id, nil}, errors.New("bad metric spec: must have at least one tag_k/tag_v pair beyond unit")
 	}
