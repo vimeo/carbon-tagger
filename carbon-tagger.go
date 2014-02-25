@@ -51,6 +51,7 @@ func main() {
 	var (
 		es_host               = config.String("elasticsearch.host", "undefined")
 		es_port               = config.Int("elasticsearch.port", 9200)
+		es_index              = config.String("elasticsearch.index", "graphite_metrics")
 		es_max_pending        = config.Int("elasticsearch.max_pending", 1000000)
 		in_port               = config.Int("in.port", 2005)
 		out_host              = config.String("out.host", "localhost")
@@ -106,7 +107,7 @@ func main() {
 	go forwardLines(*out_host, *out_port, lines_to_forward, stats, s)
 
 	// 1 worker, but ES library has multiple workers
-	go trackMetrics(metrics_to_track, stats)
+	go trackMetrics(metrics_to_track, *es_index, stats)
 
 	fmt.Printf("carbon-tagger %s ready to serve on %d\n", *statsd_id, *in_port)
 	for {
@@ -149,7 +150,7 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 	return metricSpec{metric_id, tags}, nil
 }
 
-func trackMetrics(metrics_to_track chan metricSpec, stats *Stats) {
+func trackMetrics(metrics_to_track chan metricSpec, es_index string, stats *Stats) {
 	// this could be more efficient in two ways:
 	// don't append (expensive resize)
 	// don't keep creating a new one for every metric, reuse same datastructure
@@ -171,7 +172,7 @@ func trackMetrics(metrics_to_track chan metricSpec, stats *Stats) {
 		}
 		metric_es := MetricEs{tags}
 		//fmt.Printf("saving metric %s - %s", metric.metric_id, metric_es)
-		err := core.IndexBulk("graphite_metrics", "metric", metric.metric_id, &date, &metric_es)
+		err := core.IndexBulk(es_index, "metric", metric.metric_id, &date, &metric_es)
 		dieIfError(err)
 		tags = make([]string, 0)
 		stats.mu.Lock()
