@@ -67,7 +67,8 @@ func main() {
 	api.Domain = *es_host
 	api.Port = strconv.Itoa(*es_port)
 	done := make(chan bool)
-	core.BulkIndexorGlobalRun(4, done)
+	indexer := core.NewBulkIndexer(4)
+	indexer.Run(done)
 
 	// listen for incoming metrics
 	addr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf(":%d", *in_port))
@@ -107,7 +108,7 @@ func main() {
 	go forwardLines(*out_host, *out_port, lines_to_forward, stats, s)
 
 	// 1 worker, but ES library has multiple workers
-	go trackMetrics(metrics_to_track, *es_index, stats)
+	go trackMetrics(metrics_to_track, indexer, *es_index, stats)
 
 	fmt.Printf("carbon-tagger %s ready to serve on %d\n", *statsd_id, *in_port)
 	for {
@@ -153,7 +154,7 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 	return metricSpec{metric_id, tags}, nil
 }
 
-func trackMetrics(metrics_to_track chan metricSpec, es_index string, stats *Stats) {
+func trackMetrics(metrics_to_track chan metricSpec, indexer *core.BulkIndexer, es_index string, stats *Stats) {
 	// this could be more efficient in two ways:
 	// don't append (expensive resize)
 	// don't keep creating a new one for every metric, reuse same datastructure
@@ -175,7 +176,7 @@ func trackMetrics(metrics_to_track chan metricSpec, es_index string, stats *Stat
 		}
 		metric_es := MetricEs{tags}
 		//fmt.Printf("saving metric %s - %s", metric.metric_id, metric_es)
-		err := core.IndexBulk(es_index, "metric", metric.metric_id, &date, &metric_es)
+		err := indexer.Index(es_index, "metric", metric.metric_id, "", &date, &metric_es)
 		dieIfError(err)
 		tags = make([]string, 0)
 		stats.mu.Lock()
