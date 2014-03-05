@@ -45,6 +45,21 @@ that for metrics in metrics2.0 format correctly represents its aggregations and 
 
 to have a realtime database. you could get all metricnames later and process them offline, which lowers resource usage but has higher delays
 
+# internal metrics
+
+are in proto2 format and are also tracked in ES automatically. they are also available through the admin interface
+
+# admin telnet interface
+
+commands:
+
+```
+    help         show this menu
+    seen_proto1  list all proto1 metric keys seen so far
+    seen_proto2  list all proto2 metric keys seen and sent to ES so far
+    stats        show internal metrics performance stats
+```
+
 # performance
 
 currently, not very optimized at all! but it's probably speedy enough,

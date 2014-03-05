@@ -2,9 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
-	"github.com/cactus/go-statsd-client/statsd"
 	"github.com/mattbaird/elastigo/api"
 	"github.com/mattbaird/elastigo/core"
 	"github.com/stvp/go-toml-config"
@@ -37,31 +37,77 @@ type Stats struct {
 	mu                           sync.Mutex
 	in_conns_current             int
 	in_conns_broken_total        int64
-	in_metrics_proto2_bad_total  int64
+	in_metrics_proto1_good_total int64
 	in_metrics_proto2_good_total int64
-	in_metrics_proto1_total      int64
-	already_tracked              map[string]bool
+	in_metrics_proto1_bad_total  int64
+	in_metrics_proto2_bad_total  int64
+	seen_proto1                  map[string]bool
+	seen_proto2                  map[string]bool // only updated when it goes into ES
+	out_lines_error              int64
+	out_lines_ok                 int64
 }
 
 func NewStats() *Stats {
-	return &Stats{already_tracked: make(map[string]bool)}
+	s := Stats{
+		seen_proto1: make(map[string]bool),
+		seen_proto2: make(map[string]bool),
+	}
+	return &s
 }
+
+func (stats *Stats) GetStats() (vals map[string]int64) {
+	stats.mu.Lock()
+	vals = make(map[string]int64)
+	vals["target_type=gauge.unit=Conn.direction=in.type=open"] = int64(stats.in_conns_current)
+	vals["target_type=counter.unit=Conn.direction=in.type=broken"] = stats.in_conns_broken_total
+	vals["target_type=counter.unit=Metric.proto=1.direction=in.type=good"] = stats.in_metrics_proto1_good_total // no thorough check
+	vals["target_type=counter.unit=Metric.proto=2.direction=in.type=good"] = stats.in_metrics_proto2_good_total
+	vals["target_type=counter.unit=Err.type=invalid_line.proto=1.direction=in"] = stats.in_metrics_proto1_bad_total
+	vals["target_type=counter.unit=Err.type=invalid_line.proto=2.direction=in"] = stats.in_metrics_proto2_bad_total
+	vals["target_type=counter.unit=Err.direction=out.type=write_line_fail"] = stats.out_lines_error
+	vals["target_type=counter.unit=Line.direction=out.type=_sum_"] = stats.out_lines_ok
+	vals["target_type=gauge.unit=Metric.proto=2.type=to_track"] = int64(len(metrics_to_track))
+	vals["target_type=gauge.unit=Metric.proto=2.type=tracked"] = int64(len(stats.seen_proto2))
+	vals["target_type=gauge.unit=Metric.proto=1.type=seen"] = int64(len(stats.seen_proto1))
+	stats.mu.Unlock()
+	return
+}
+func submitStats(stats *Stats, interval int) {
+	for {
+		timestamp := int32(time.Now().Unix())
+		vals := stats.GetStats()
+		for k, v := range vals {
+			input_lines <- []byte(fmt.Sprintf("service=carbon-tagger.instance=%s.%s %d %d", stats_id, k, v, timestamp))
+		}
+		time.Sleep(time.Duration(interval) * time.Second) // todo: run the stats submissions exactly every X seconds
+	}
+}
+
+var stats = NewStats()
+var metrics_to_track chan metricSpec
+var input_lines chan []byte
+var lines_to_forward chan []byte
+var stats_id string
+var stats_flush_interval int
 
 func main() {
 	var (
-		es_host               = config.String("elasticsearch.host", "undefined")
-		es_port               = config.Int("elasticsearch.port", 9200)
-		es_index              = config.String("elasticsearch.index", "graphite_metrics")
-		es_max_pending        = config.Int("elasticsearch.max_pending", 1000000)
-		in_port               = config.Int("in.port", 2005)
-		out_host              = config.String("out.host", "localhost")
-		out_port              = config.Int("out.port", 2003)
-		statsd_address        = config.String("statsd.address", "localhost:8125")
-		statsd_id             = config.String("statsd.id", "myhost")
-		statsd_flush_interval = config.Int("statsd.flush_interval", 2003)
+		es_host        = config.String("elasticsearch.host", "undefined")
+		es_port        = config.Int("elasticsearch.port", 9200)
+		es_index       = config.String("elasticsearch.index", "graphite_metrics")
+		es_max_pending = config.Int("elasticsearch.max_pending", 1000000)
+		in_port        = config.Int("in.port", 2003)
+		out_host       = config.String("out.host", "localhost")
+		out_port       = config.Int("out.port", 2005)
+		admin_port     = config.Int("admin.port", 2002)
 	)
+	stats_id = *config.String("stats.id", "myhost")
+	stats_flush_interval = *config.Int("stats.flush_interval", 10)
+	input_lines = make(chan []byte)
+	lines_to_forward = make(chan []byte)
 	err := config.Parse("carbon-tagger.conf")
 	dieIfError(err)
+	admin_addr := fmt.Sprintf(":%d", *admin_port)
 
 	// connect to elasticsearch database to store tags
 	api.Domain = *es_host
@@ -69,6 +115,9 @@ func main() {
 	done := make(chan bool)
 	indexer := core.NewBulkIndexer(4)
 	indexer.Run(done)
+
+	// process input lines
+	go processInputLines()
 
 	// listen for incoming metrics
 	addr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf(":%d", *in_port))
@@ -78,44 +127,24 @@ func main() {
 	defer listener.Close()
 
 	// we can queue up to max_pending: if more than that are pending flush to ES, start blocking..
-	metrics_to_track := make(chan metricSpec, *es_max_pending)
+	metrics_to_track = make(chan metricSpec, *es_max_pending)
 
-	// statsd client
-	s, err := statsd.Dial(*statsd_address, fmt.Sprintf("carbon-tagger.%s", *statsd_id))
-	dieIfError(err)
-	defer s.Close()
+	go submitStats(stats, stats_flush_interval)
 
-	stats := NewStats()
-
-	submitStats := func(stats *Stats, s *statsd.Client) {
-		for {
-			stats.mu.Lock()
-			s.Gauge("in.conns.current", int64(stats.in_conns_current), 1)
-			s.Gauge("in.conns.broken.total", stats.in_conns_broken_total, 1)
-			s.Gauge("in.metrics.proto2.bad.total", stats.in_metrics_proto2_bad_total, 1)
-			s.Gauge("in.metrics.proto2.good.total", stats.in_metrics_proto2_good_total, 1)
-			s.Gauge("in.metrics.proto1.total", stats.in_metrics_proto1_total, 1)
-			s.Gauge("metrics.proto2.count-pending-tracking", int64(len(metrics_to_track)), 1)
-			s.Gauge("metrics.proto2.count-already-tracked", int64(len(stats.already_tracked)), 1)
-			stats.mu.Unlock()
-			time.Sleep(time.Duration(*statsd_flush_interval) * time.Second) // todo: run the stats submissions exactly every X seconds
-		}
-	}
-	go submitStats(stats, s)
-
-	lines_to_forward := make(chan []byte)
 	// 1 forwarding worker should suffice?
-	go forwardLines(*out_host, *out_port, lines_to_forward, stats, s)
+	go forwardLines(*out_host, *out_port, stats)
 
 	// 1 worker, but ES library has multiple workers
-	go trackMetrics(metrics_to_track, indexer, *es_index, stats)
+	go trackMetrics(indexer, *es_index, stats)
 
-	fmt.Printf("carbon-tagger %s ready to serve on %d\n", *statsd_id, *in_port)
+	go adminListener(admin_addr)
+
+	fmt.Printf("carbon-tagger %s ready to serve on %d\n", stats_id, *in_port)
 	for {
 		// would be nice to have a metric showing highest amount of connections seen per interval
 		conn_in, err := listener.Accept()
 		dieIfError(err)
-		go handleClient(conn_in, metrics_to_track, lines_to_forward, stats)
+		go handleClient(conn_in, stats)
 	}
 }
 
@@ -154,7 +183,7 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 	return metricSpec{metric_id, tags}, nil
 }
 
-func trackMetrics(metrics_to_track chan metricSpec, indexer *core.BulkIndexer, es_index string, stats *Stats) {
+func trackMetrics(indexer *core.BulkIndexer, es_index string, stats *Stats) {
 	// this could be more efficient in two ways:
 	// don't append (expensive resize)
 	// don't keep creating a new one for every metric, reuse same datastructure
@@ -165,7 +194,7 @@ func trackMetrics(metrics_to_track chan metricSpec, indexer *core.BulkIndexer, e
 		metric := <-metrics_to_track
 		// this is racey but that's not so bad, processing the same metric and sending it to ES twice is not so bad.
 		stats.mu.Lock()
-		_, ok := stats.already_tracked[metric.metric_id]
+		_, ok := stats.seen_proto2[metric.metric_id]
 		stats.mu.Unlock()
 		if ok {
 			continue
@@ -180,7 +209,7 @@ func trackMetrics(metrics_to_track chan metricSpec, indexer *core.BulkIndexer, e
 		dieIfError(err)
 		tags = make([]string, 0)
 		stats.mu.Lock()
-		stats.already_tracked[metric.metric_id] = true
+		stats.seen_proto2[metric.metric_id] = true
 		stats.mu.Unlock()
 	}
 }
@@ -233,14 +262,12 @@ func (q *Queue) Pop() *Node {
 	return node
 }
 
-func forwardLines(out_host string, out_port int, lines_to_forward chan []byte, stats *Stats, s *statsd.Client) {
+func forwardLines(out_host string, out_port int, stats *Stats) {
 	// connect to outgoing carbon daemon (carbon-relay, carbon-cache, ..)
 	conn_out, err := net.Dial("tcp", fmt.Sprintf("%s:%d", out_host, out_port))
 	dieIfError(err)
 	lines_to_retry := NewQueue(100)
 
-	out_lines_error := int64(0)
-	out_lines_ok := int64(0)
 	var line []byte
 	for {
 		if lines_to_retry.count > 0 {
@@ -265,17 +292,19 @@ func forwardLines(out_host string, out_port int, lines_to_forward chan []byte, s
 				fmt.Fprintf(os.Stderr, "reconnected to %s:%d.\n", out_host, out_port)
 				lines_to_retry.Push(&Node{line})
 			} else {
-				out_lines_error += 1
-				s.Gauge("out.lines.error", out_lines_error, 1)
+				stats.mu.Lock()
+				stats.out_lines_error += 1
+				stats.mu.Unlock()
 			}
 		} else {
-			out_lines_ok += 1
-			s.Gauge("out.lines.ok", out_lines_ok, 1)
+			stats.mu.Lock()
+			stats.out_lines_ok += 1
+			stats.mu.Unlock()
 		}
 	}
 }
 
-func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, lines_to_forward chan []byte, stats *Stats) {
+func handleClient(conn_in net.Conn, stats *Stats) {
 	stats.mu.Lock()
 	stats.in_conns_current += 1
 	stats.mu.Unlock()
@@ -301,6 +330,15 @@ func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, lines_to_f
 			stats.mu.Unlock()
 			return
 		}
+		input_lines <- buf
+	}
+	stats.mu.Lock()
+	stats.in_conns_current -= 1
+	stats.mu.Unlock()
+}
+
+func processInputLines() {
+	for buf := range input_lines {
 		str := string(buf)
 		if strings.ContainsAny(str, "=") {
 			str = strings.TrimSpace(str)
@@ -317,13 +355,96 @@ func handleClient(conn_in net.Conn, metrics_to_track chan metricSpec, lines_to_f
 				lines_to_forward <- buf
 			}
 		} else {
+			elements := strings.Split(str, " ")
 			stats.mu.Lock()
-			stats.in_metrics_proto1_total += 1
+			if len(elements) == 3 {
+				stats.in_metrics_proto1_good_total += 1
+				stats.seen_proto1[elements[0]] = true
+			} else {
+				stats.in_metrics_proto1_bad_total += 1
+			}
 			stats.mu.Unlock()
 			lines_to_forward <- buf
 		}
 	}
-	stats.mu.Lock()
-	stats.in_conns_current -= 1
-	stats.mu.Unlock()
+}
+
+func writeHelp(conn net.Conn) {
+	help := `
+commands:
+    help         show this menu
+    seen_proto1  list all proto1 metric keys seen so far
+    seen_proto2  list all proto2 metric keys seen and sent to ES so far
+    stats        show internal metrics performance stats
+
+`
+	conn.Write([]byte(help))
+}
+
+// handleApiRequest handles one or more api requests over the admin interface.
+// WARNING/TODO: for now, a slow admin connection could lock the stats too long
+// we should decouple this a little more
+func handleApiRequest(conn net.Conn, write_first bytes.Buffer) {
+	write_first.WriteTo(conn)
+	// Make a buffer to hold incoming data.
+	buf := make([]byte, 1024)
+	// Read the incoming connection into the buffer.
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				fmt.Println("read eof. closing")
+				conn.Close()
+				break
+			} else {
+				fmt.Println("Error reading:", err.Error())
+			}
+		}
+		clean_cmd := strings.TrimSpace(string(buf[:n]))
+		command := strings.Split(clean_cmd, " ")
+		switch command[0] {
+		case "seen_proto1":
+			stats.mu.Lock()
+			for metric := range stats.seen_proto1 {
+				conn.Write([]byte(metric))
+				conn.Write([]byte("\n"))
+			}
+			stats.mu.Unlock()
+		case "seen_proto2":
+			stats.mu.Lock()
+			for metric := range stats.seen_proto2 {
+				conn.Write([]byte(metric))
+				conn.Write([]byte("\n"))
+			}
+			stats.mu.Unlock()
+		case "stats":
+			vals := stats.GetStats()
+			for k, v := range vals {
+				conn.Write([]byte(fmt.Sprintf("%80s %d\n", k, v)))
+			}
+		case "help":
+			writeHelp(conn)
+		default:
+			conn.Write([]byte("unknown command\n"))
+			writeHelp(conn)
+		}
+	}
+}
+func adminListener(admin_addr string) {
+	l, err := net.Listen("tcp", admin_addr)
+	if err != nil {
+		fmt.Println("Error listening:", err.Error())
+		os.Exit(1)
+	}
+	defer l.Close()
+	fmt.Println("Listening on " + admin_addr)
+	for {
+		// Listen for an incoming connection.
+		conn, err := l.Accept()
+		if err != nil {
+			fmt.Println("Error accepting: ", err.Error())
+			os.Exit(1)
+		}
+		go handleApiRequest(conn, bytes.Buffer{})
+	}
 }
