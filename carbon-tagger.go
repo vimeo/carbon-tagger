@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,7 +78,7 @@ func submitStats(stats *Stats, interval int) {
 		timestamp := int32(time.Now().Unix())
 		vals := stats.GetStats()
 		for k, v := range vals {
-			input_lines <- []byte(fmt.Sprintf("service=carbon-tagger.instance=%s.%s %d %d", stats_id, k, v, timestamp))
+			input_lines <- []byte(fmt.Sprintf("service=carbon-tagger.instance=%s.%s %d %d\n", *stats_id, k, v, timestamp))
 		}
 		time.Sleep(time.Duration(interval) * time.Second) // todo: run the stats submissions exactly every X seconds
 	}
@@ -87,22 +88,22 @@ var stats = NewStats()
 var metrics_to_track chan metricSpec
 var input_lines chan []byte
 var lines_to_forward chan []byte
-var stats_id string
-var stats_flush_interval int
+var stats_id *string
+var stats_flush_interval *int
 
 func main() {
 	var (
 		es_host        = config.String("elasticsearch.host", "undefined")
 		es_port        = config.Int("elasticsearch.port", 9200)
-		es_index       = config.String("elasticsearch.index", "graphite_metrics")
+		es_index       = config.String("elasticsearch.index", "graphite_metrics2")
 		es_max_pending = config.Int("elasticsearch.max_pending", 1000000)
 		in_port        = config.Int("in.port", 2003)
 		out_host       = config.String("out.host", "localhost")
 		out_port       = config.Int("out.port", 2005)
 		admin_port     = config.Int("admin.port", 2002)
 	)
-	stats_id = *config.String("stats.id", "myhost")
-	stats_flush_interval = *config.Int("stats.flush_interval", 10)
+	stats_id = config.String("stats.id", "myhost")
+	stats_flush_interval = config.Int("stats.flush_interval", 10)
 	input_lines = make(chan []byte)
 	lines_to_forward = make(chan []byte)
 	err := config.Parse("carbon-tagger.conf")
@@ -129,7 +130,7 @@ func main() {
 	// we can queue up to max_pending: if more than that are pending flush to ES, start blocking..
 	metrics_to_track = make(chan metricSpec, *es_max_pending)
 
-	go submitStats(stats, stats_flush_interval)
+	go submitStats(stats, *stats_flush_interval)
 
 	// 1 forwarding worker should suffice?
 	go forwardLines(*out_host, *out_port, stats)
@@ -139,7 +140,7 @@ func main() {
 
 	go adminListener(admin_addr)
 
-	fmt.Printf("carbon-tagger %s ready to serve on %d\n", stats_id, *in_port)
+	fmt.Printf("carbon-tagger %s ready to serve on %d\n", *stats_id, *in_port)
 	for {
 		// would be nice to have a metric showing highest amount of connections seen per interval
 		conn_in, err := listener.Accept()
@@ -419,8 +420,13 @@ func handleApiRequest(conn net.Conn, write_first bytes.Buffer) {
 			stats.mu.Unlock()
 		case "stats":
 			vals := stats.GetStats()
-			for k, v := range vals {
-				conn.Write([]byte(fmt.Sprintf("%80s %d\n", k, v)))
+			var keys []string
+			for k := range vals {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				conn.Write([]byte(fmt.Sprintf("%80s %d\n", k, vals[k])))
 			}
 		case "help":
 			writeHelp(conn)
