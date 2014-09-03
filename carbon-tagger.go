@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"flag"
 	"fmt"
 	"github.com/mattbaird/elastigo/api"
 	"github.com/mattbaird/elastigo/core"
@@ -90,8 +91,13 @@ var input_lines chan []byte
 var lines_to_forward chan []byte
 var stats_id *string
 var stats_flush_interval *int
+var configFile string
 
+func init() {
+	flag.StringVar(&configFile, "config", "carbon-tagger.conf", "config file")
+}
 func main() {
+	flag.Parse()
 	var (
 		es_host        = config.String("elasticsearch.host", "undefined")
 		es_port        = config.Int("elasticsearch.port", 9200)
@@ -106,7 +112,7 @@ func main() {
 	stats_flush_interval = config.Int("stats.flush_interval", 10)
 	input_lines = make(chan []byte)
 	lines_to_forward = make(chan []byte)
-	err := config.Parse("carbon-tagger.conf")
+	err := config.Parse(configFile)
 	dieIfError(err)
 	admin_addr := fmt.Sprintf(":%d", *admin_port)
 
