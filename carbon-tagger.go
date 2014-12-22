@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -45,8 +44,6 @@ type Stats struct {
 	in_metrics_proto2_bad_total  int64
 	seen_proto1                  map[string]bool
 	seen_proto2                  map[string]bool // only updated when it goes into ES
-	out_lines_error              int64
-	out_lines_ok                 int64
 }
 
 func NewStats() *Stats {
@@ -66,8 +63,6 @@ func (stats *Stats) GetStats() (vals map[string]int64) {
 	vals["target_type=counter.unit=Metric.proto=2.direction=in.type=good"] = stats.in_metrics_proto2_good_total
 	vals["target_type=counter.unit=Err.type=invalid_line.proto=1.direction=in"] = stats.in_metrics_proto1_bad_total
 	vals["target_type=counter.unit=Err.type=invalid_line.proto=2.direction=in"] = stats.in_metrics_proto2_bad_total
-	vals["target_type=counter.unit=Err.direction=out.type=write_line_fail"] = stats.out_lines_error
-	vals["target_type=counter.unit=Line.direction=out.type=_sum_"] = stats.out_lines_ok
 	vals["target_type=gauge.unit=Metric.proto=2.type=to_track"] = int64(len(metrics_to_track))
 	vals["target_type=gauge.unit=Metric.proto=2.type=tracked"] = int64(len(stats.seen_proto2))
 	vals["target_type=gauge.unit=Metric.proto=1.type=seen"] = int64(len(stats.seen_proto1))
@@ -88,7 +83,6 @@ func submitStats(stats *Stats, interval int) {
 var stats = NewStats()
 var metrics_to_track chan metricSpec
 var input_lines chan []byte
-var lines_to_forward chan []byte
 var stats_id *string
 var stats_flush_interval *int
 var configFile string
@@ -104,14 +98,11 @@ func main() {
 		es_index       = config.String("elasticsearch.index", "graphite_metrics2")
 		es_max_pending = config.Int("elasticsearch.max_pending", 1000000)
 		in_port        = config.Int("in.port", 2003)
-		out_host       = config.String("out.host", "localhost")
-		out_port       = config.Int("out.port", 2005)
 		admin_port     = config.Int("admin.port", 2002)
 	)
 	stats_id = config.String("stats.id", "myhost")
 	stats_flush_interval = config.Int("stats.flush_interval", 10)
 	input_lines = make(chan []byte)
-	lines_to_forward = make(chan []byte)
 	err := config.Parse(configFile)
 	dieIfError(err)
 	admin_addr := fmt.Sprintf(":%d", *admin_port)
@@ -137,9 +128,6 @@ func main() {
 	metrics_to_track = make(chan metricSpec, *es_max_pending)
 
 	go submitStats(stats, *stats_flush_interval)
-
-	// 1 forwarding worker should suffice?
-	go forwardLines(*out_host, *out_port, stats)
 
 	// 1 worker, but ES library has multiple workers
 	go trackMetrics(indexer, *es_index, stats)
@@ -269,48 +257,6 @@ func (q *Queue) Pop() *Node {
 	return node
 }
 
-func forwardLines(out_host string, out_port int, stats *Stats) {
-	// connect to outgoing carbon daemon (carbon-relay, carbon-cache, ..)
-	conn_out, err := net.Dial("tcp", fmt.Sprintf("%s:%d", out_host, out_port))
-	dieIfError(err)
-	lines_to_retry := NewQueue(100)
-
-	var line []byte
-	for {
-		if lines_to_retry.count > 0 {
-			// copy needed?
-			copy(line, lines_to_retry.Pop().line)
-		} else {
-			line = <-lines_to_forward
-		}
-		_, err := conn_out.Write(line)
-		if err != nil {
-			// asert err.(*net.OpError) without panicking?
-			if err.(*net.OpError).Err == syscall.EPIPE {
-				// TODO for now this just blocks.. later we'll want lines_to_retry to become a real FIFO and don't block input
-				// (upto a certain max size).  then, instrument how long the recovery takes (in time and in requeued lines)
-				fmt.Fprintf(os.Stderr, "broken pipe to %s:%d. reconnecting..\n", out_host, out_port)
-				conn_out, err = net.Dial("tcp", fmt.Sprintf("%s:%d", out_host, out_port))
-				for err != nil && err.(*net.OpError).Err == syscall.ECONNREFUSED {
-					fmt.Fprintf(os.Stderr, "conn refused @ %s:%d. reconnecting..\n", out_host, out_port)
-					time.Sleep(500 * time.Millisecond)
-					conn_out, err = net.Dial("tcp", fmt.Sprintf("%s:%d", out_host, out_port))
-				}
-				fmt.Fprintf(os.Stderr, "reconnected to %s:%d.\n", out_host, out_port)
-				lines_to_retry.Push(&Node{line})
-			} else {
-				stats.mu.Lock()
-				stats.out_lines_error += 1
-				stats.mu.Unlock()
-			}
-		} else {
-			stats.mu.Lock()
-			stats.out_lines_ok += 1
-			stats.mu.Unlock()
-		}
-	}
-}
-
 func handleClient(conn_in net.Conn, stats *Stats) {
 	stats.mu.Lock()
 	stats.in_conns_current += 1
@@ -359,7 +305,6 @@ func processInputLines() {
 				stats.in_metrics_proto2_good_total += 1
 				stats.mu.Unlock()
 				metrics_to_track <- metric
-				lines_to_forward <- buf
 			}
 		} else {
 			elements := strings.Split(str, " ")
@@ -371,7 +316,6 @@ func processInputLines() {
 				stats.in_metrics_proto1_bad_total += 1
 			}
 			stats.mu.Unlock()
-			lines_to_forward <- buf
 		}
 	}
 }
