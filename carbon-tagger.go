@@ -69,14 +69,20 @@ func (stats *Stats) GetStats() (vals map[string]int64) {
 	stats.mu.Unlock()
 	return
 }
-func submitStats(stats *Stats, interval int) {
+func submitStats(stats *Stats, interval int, carbon_host string, carbon_port int) {
 	ticker := time.Tick(time.Duration(interval) * time.Second)
 	for t := range ticker {
 		timestamp := int32(t.Unix())
+		conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", carbon_host, carbon_port))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write stats - %s\n", err)
+			continue
+		}
 		vals := stats.GetStats()
 		for k, v := range vals {
-			input_lines <- []byte(fmt.Sprintf("service=carbon-tagger.instance=%s.%s %d %d\n", *stats_id, k, v, timestamp))
+			conn.Write([]byte(fmt.Sprintf("service=carbon-tagger.instance=%s.%s %d %d\n", *stats_id, k, v, timestamp)))
 		}
+		conn.Close()
 	}
 }
 
@@ -95,10 +101,13 @@ func main() {
 	var (
 		es_host        = config.String("elasticsearch.host", "undefined")
 		es_port        = config.Int("elasticsearch.port", 9200)
-		es_index       = config.String("elasticsearch.index", "graphite_metrics2")
+		es_index_name  = config.String("elasticsearch.index", "graphite_metrics2")
 		es_max_pending = config.Int("elasticsearch.max_pending", 1000000)
 		in_port        = config.Int("in.port", 2003)
-		admin_port     = config.Int("admin.port", 2002)
+		out_host       = config.String("out.host", "localhost")
+		out_port       = config.Int("out.port", 2005)
+
+		admin_port = config.Int("admin.port", 2002)
 	)
 	stats_id = config.String("stats.id", "myhost")
 	stats_flush_interval = config.Int("stats.flush_interval", 10)
@@ -127,10 +136,10 @@ func main() {
 	// we can queue up to max_pending: if more than that are pending flush to ES, start blocking..
 	metrics_to_track = make(chan metricSpec, *es_max_pending)
 
-	go submitStats(stats, *stats_flush_interval)
+	go submitStats(stats, *stats_flush_interval, *out_host, *out_port)
 
 	// 1 worker, but ES library has multiple workers
-	go trackMetrics(indexer, *es_index, stats)
+	go trackMetrics(indexer, *es_index_name, stats)
 
 	go adminListener(admin_addr)
 
@@ -178,7 +187,7 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 	return metricSpec{metric_id, tags}, nil
 }
 
-func trackMetrics(indexer *core.BulkIndexer, es_index string, stats *Stats) {
+func trackMetrics(indexer *core.BulkIndexer, index_name string, stats *Stats) {
 	// this could be more efficient in two ways:
 	// don't append (expensive resize)
 	// don't keep creating a new one for every metric, reuse same datastructure
@@ -200,7 +209,8 @@ func trackMetrics(indexer *core.BulkIndexer, es_index string, stats *Stats) {
 		}
 		metric_es := MetricEs{tags}
 		//fmt.Printf("saving metric %s - %s", metric.metric_id, metric_es)
-		err := indexer.Index(es_index, "metric", metric.metric_id, "", &date, &metric_es)
+		refresh := false // we can wait until the regular indexing runs
+		err := indexer.Index(index_name, "metric", metric.metric_id, "", &date, &metric_es, refresh)
 		dieIfError(err)
 		tags = make([]string, 0)
 		stats.mu.Lock()
@@ -393,7 +403,7 @@ func adminListener(admin_addr string) {
 		os.Exit(1)
 	}
 	defer l.Close()
-	fmt.Println("Listening on " + admin_addr)
+	fmt.Println("Admin interface listening on " + admin_addr)
 	for {
 		// Listen for an incoming connection.
 		conn, err := l.Accept()
