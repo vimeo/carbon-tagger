@@ -70,13 +70,13 @@ func (stats *Stats) GetStats() (vals map[string]int64) {
 	return
 }
 func submitStats(stats *Stats, interval int) {
-	for {
-		timestamp := int32(time.Now().Unix())
+	ticker := time.Tick(time.Duration(interval) * time.Second)
+	for t := range ticker {
+		timestamp := int32(t.Unix())
 		vals := stats.GetStats()
 		for k, v := range vals {
 			input_lines <- []byte(fmt.Sprintf("service=carbon-tagger.instance=%s.%s %d %d\n", *stats_id, k, v, timestamp))
 		}
-		time.Sleep(time.Duration(interval) * time.Second) // todo: run the stats submissions exactly every X seconds
 	}
 }
 
