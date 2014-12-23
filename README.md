@@ -97,6 +97,9 @@ if you already have a working Go setup, adjust accordingly:
 mkdir -p ~/go/
 export GOPATH=~/go
 go get github.com/Vimeo/carbon-tagger
+go get github.com/tools/godep
+cd $GOPATH/src/github.com/Vimeo/carbon-tagger
+godep go build
 ```
 # installation
 
