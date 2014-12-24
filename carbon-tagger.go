@@ -6,16 +6,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/Dieterbe/go-metrics"
 	"github.com/mattbaird/elastigo/api"
 	"github.com/mattbaird/elastigo/core"
 	"github.com/stvp/go-toml-config"
 	"io"
 	"net"
 	"os"
-	"sort"
+	"runtime/pprof"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -26,95 +26,72 @@ func dieIfError(err error) {
 	}
 }
 
-type metricSpec struct {
-	metric_id string
-	tags      map[string]string
-}
-type MetricEs struct {
-	Tags []string `json:"tags"`
-}
+var (
+	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
+	memprofile = flag.String("memprofile", "", "write memory profile to this file")
+	configFile = flag.String("config", "carbon-tagger.conf", "config file")
 
-type Stats struct {
-	mu                           sync.Mutex
-	in_conns_current             int
-	in_conns_broken_total        int64
-	in_metrics_proto1_good_total int64
-	in_metrics_proto2_good_total int64
-	in_metrics_proto1_bad_total  int64
-	in_metrics_proto2_bad_total  int64
-	seen_proto1                  map[string]bool
-	seen_proto2                  map[string]bool // only updated when it goes into ES
-}
+	es_host        = config.String("elasticsearch.host", "undefined")
+	es_port        = config.Int("elasticsearch.port", 9200)
+	es_index_name  = config.String("elasticsearch.index", "graphite_metrics2")
+	es_max_pending = config.Int("elasticsearch.max_pending", 1000000)
+	in_port        = config.Int("in.port", 2003)
+	out_host       = config.String("out.host", "localhost")
+	out_port       = config.Int("out.port", 2005)
 
-func NewStats() *Stats {
-	s := Stats{
-		seen_proto1: make(map[string]bool),
-		seen_proto2: make(map[string]bool),
-	}
-	return &s
-}
+	stats_id             *string
+	stats_flush_interval *int
 
-func (stats *Stats) GetStats() (vals map[string]int64) {
-	stats.mu.Lock()
-	vals = make(map[string]int64)
-	vals["target_type=gauge.unit=Conn.direction=in.type=open"] = int64(stats.in_conns_current)
-	vals["target_type=counter.unit=Conn.direction=in.type=broken"] = stats.in_conns_broken_total
-	vals["target_type=counter.unit=Metric.proto=1.direction=in.type=good"] = stats.in_metrics_proto1_good_total // no thorough check
-	vals["target_type=counter.unit=Metric.proto=2.direction=in.type=good"] = stats.in_metrics_proto2_good_total
-	vals["target_type=counter.unit=Err.type=invalid_line.proto=1.direction=in"] = stats.in_metrics_proto1_bad_total
-	vals["target_type=counter.unit=Err.type=invalid_line.proto=2.direction=in"] = stats.in_metrics_proto2_bad_total
-	vals["target_type=gauge.unit=Metric.proto=2.type=to_track"] = int64(len(metrics_to_track))
-	vals["target_type=gauge.unit=Metric.proto=2.type=tracked"] = int64(len(stats.seen_proto2))
-	vals["target_type=gauge.unit=Metric.proto=1.type=seen"] = int64(len(stats.seen_proto1))
-	stats.mu.Unlock()
-	return
-}
-func submitStats(stats *Stats, interval int, carbon_host string, carbon_port int) {
-	ticker := time.Tick(time.Duration(interval) * time.Second)
-	for t := range ticker {
-		timestamp := int32(t.Unix())
-		conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", carbon_host, carbon_port))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to write stats - %s\n", err)
-			continue
-		}
-		vals := stats.GetStats()
-		for k, v := range vals {
-			conn.Write([]byte(fmt.Sprintf("service=carbon-tagger.instance=%s.%s %d %d\n", *stats_id, k, v, timestamp)))
-		}
-		conn.Close()
-	}
-}
+	in_conns_current             stat
+	in_conns_broken_total        stat
+	in_metrics_proto1_good_total stat
+	in_metrics_proto2_good_total stat
+	in_metrics_proto1_bad_total  stat
+	in_metrics_proto2_bad_total  stat
+	num_metrics_to_track         stat // backlog in our queue (excl elastigo queue)
+	num_seen_proto2              stat
+	num_seen_proto1              stat
 
-var stats = NewStats()
-var metrics_to_track chan metricSpec
-var input_lines chan []byte
-var stats_id *string
-var stats_flush_interval *int
-var configFile string
+	lines_read  chan []byte
+	proto1_read chan string
+	proto2_read chan metricSpec
+)
 
-func init() {
-	flag.StringVar(&configFile, "config", "carbon-tagger.conf", "config file")
-}
 func main() {
 	flag.Parse()
-	var (
-		es_host        = config.String("elasticsearch.host", "undefined")
-		es_port        = config.Int("elasticsearch.port", 9200)
-		es_index_name  = config.String("elasticsearch.index", "graphite_metrics2")
-		es_max_pending = config.Int("elasticsearch.max_pending", 1000000)
-		in_port        = config.Int("in.port", 2003)
-		out_host       = config.String("out.host", "localhost")
-		out_port       = config.Int("out.port", 2005)
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		dieIfError(err)
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+		fmt.Println("cpuprof on")
+	}
+	if *memprofile != "" {
+		f, err := os.Create(*memprofile)
+		dieIfError(err)
+		defer f.Close()
+		defer pprof.WriteHeapProfile(f)
+	}
 
-		admin_port = config.Int("admin.port", 2002)
-	)
 	stats_id = config.String("stats.id", "myhost")
 	stats_flush_interval = config.Int("stats.flush_interval", 10)
-	input_lines = make(chan []byte)
-	err := config.Parse(configFile)
+	err := config.Parse(*configFile)
 	dieIfError(err)
-	admin_addr := fmt.Sprintf(":%d", *admin_port)
+
+	in_conns_current = NewGauge("unit=Conn.direction=in.type=open", false)
+	in_conns_broken_total = NewCounter("unit=Conn.direction=in.type=broken", false)
+	in_metrics_proto1_good_total = NewCounter("unit=Metric.proto=1.direction=in.type=good", false) // no thorough check
+	in_metrics_proto2_good_total = NewCounter("unit=Metric.proto=2.direction=in.type=good", false)
+	in_metrics_proto1_bad_total = NewCounter("unit=Err.type=invalid_line.proto=1.direction", false)
+	in_metrics_proto2_bad_total = NewCounter("unit=Err.type=invalid_line.proto=2.direction", false)
+	num_metrics_to_track = NewCounter("unit=Metric.proto=2.type=to_track", true)
+	num_seen_proto1 = NewGauge("unit=Metric.proto=1.type=tracked", true)
+	num_seen_proto2 = NewGauge("unit=Metric.proto=2.type=tracked", true)
+
+	lines_read = make(chan []byte)
+	proto1_read = make(chan string)
+	// we can queue up to max_pending: if more than that are pending flush to ES, start blocking..
+	proto2_read = make(chan metricSpec, *es_max_pending)
 
 	// connect to elasticsearch database to store tags
 	api.Domain = *es_host
@@ -123,8 +100,14 @@ func main() {
 	indexer := core.NewBulkIndexer(4)
 	indexer.Run(done)
 
-	// process input lines
 	go processInputLines()
+	go trackProto1()
+	// 1 worker, but ES library has multiple workers
+	go trackProto2(indexer, *es_index_name)
+
+	statsAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", *out_host, *out_port))
+	dieIfError(err)
+	go metrics.Graphite(metrics.DefaultRegistry, time.Duration(*stats_flush_interval)*time.Second, "", statsAddr)
 
 	// listen for incoming metrics
 	addr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf(":%d", *in_port))
@@ -132,23 +115,15 @@ func main() {
 	listener, err := net.ListenTCP("tcp", addr)
 	dieIfError(err)
 	defer listener.Close()
-
-	// we can queue up to max_pending: if more than that are pending flush to ES, start blocking..
-	metrics_to_track = make(chan metricSpec, *es_max_pending)
-
-	go submitStats(stats, *stats_flush_interval, *out_host, *out_port)
-
-	// 1 worker, but ES library has multiple workers
-	go trackMetrics(indexer, *es_index_name, stats)
-
-	go adminListener(admin_addr)
-
-	fmt.Printf("carbon-tagger %s ready to serve on %d\n", *stats_id, *in_port)
+	fmt.Printf("carbon-tagger %s listening on %d\n", *stats_id, *in_port)
 	for {
 		// would be nice to have a metric showing highest amount of connections seen per interval
 		conn_in, err := listener.Accept()
-		dieIfError(err)
-		go handleClient(conn_in, stats)
+		if err != nil {
+			fmt.Fprint(os.Stderr, err)
+			continue
+		}
+		go handleClient(conn_in)
 	}
 }
 
@@ -187,90 +162,9 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 	return metricSpec{metric_id, tags}, nil
 }
 
-func trackMetrics(indexer *core.BulkIndexer, index_name string, stats *Stats) {
-	// this could be more efficient in two ways:
-	// don't append (expensive resize)
-	// don't keep creating a new one for every metric, reuse same datastructure
-	// we could for example keep an array with like 100 slots (no metric will ever reach that much) and fill the array from 0 upwards,
-	// and then just create a slice pointing to the last inserted item.
-	tags := make([]string, 0)
-	for {
-		metric := <-metrics_to_track
-		// this is racey but that's not so bad, processing the same metric and sending it to ES twice is not so bad.
-		stats.mu.Lock()
-		_, ok := stats.seen_proto2[metric.metric_id]
-		stats.mu.Unlock()
-		if ok {
-			continue
-		}
-		date := time.Now()
-		for tag_key, tag_val := range metric.tags {
-			tags = append(tags, fmt.Sprintf("%s=%s", tag_key, tag_val))
-		}
-		metric_es := MetricEs{tags}
-		//fmt.Printf("saving metric %s - %s", metric.metric_id, metric_es)
-		refresh := false // we can wait until the regular indexing runs
-		err := indexer.Index(index_name, "metric", metric.metric_id, "", &date, &metric_es, refresh)
-		dieIfError(err)
-		tags = make([]string, 0)
-		stats.mu.Lock()
-		stats.seen_proto2[metric.metric_id] = true
-		stats.mu.Unlock()
-	}
-}
-
-// from https://gist.github.com/moraes/2141121
-type Node struct {
-	line []byte
-}
-
-// Queue is a basic FIFO queue based on a circular list that resizes as needed.
-type Queue struct {
-	nodes []*Node
-	size  int
-	head  int
-	tail  int
-	count int
-}
-
-// NewQueue returns a new queue with the given initial size.
-func NewQueue(size int) *Queue {
-	return &Queue{
-		nodes: make([]*Node, size),
-		size:  size,
-	}
-}
-
-// Push adds a node to the queue.
-func (q *Queue) Push(n *Node) {
-	if q.head == q.tail && q.count > 0 {
-		nodes := make([]*Node, len(q.nodes)+q.size)
-		copy(nodes, q.nodes[q.head:])
-		copy(nodes[len(q.nodes)-q.head:], q.nodes[:q.head])
-		q.head = 0
-		q.tail = len(q.nodes)
-		q.nodes = nodes
-	}
-	q.nodes[q.tail] = n
-	q.tail = (q.tail + 1) % len(q.nodes)
-	q.count++
-}
-
-// Pop removes and returns a node from the queue in first to last order.
-func (q *Queue) Pop() *Node {
-	if q.count == 0 {
-		return nil
-	}
-	node := q.nodes[q.head]
-	q.head = (q.head + 1) % len(q.nodes)
-	q.count--
-	return node
-}
-
-func handleClient(conn_in net.Conn, stats *Stats) {
-	stats.mu.Lock()
-	stats.in_conns_current += 1
-	stats.mu.Unlock()
+func handleClient(conn_in net.Conn) {
+	in_conns_current.Inc(1)
+	defer in_conns_current.Dec(1)
 	defer conn_in.Close()
 	reader := bufio.NewReader(conn_in)
 	for {
@@ -280,137 +174,77 @@ func handleClient(conn_in net.Conn, stats *Stats) {
 			str := strings.TrimSpace(string(buf))
 			if err != io.EOF {
 				fmt.Printf("WARN connection closed uncleanly/broken: %s\n", err.Error())
-				stats.mu.Lock()
-				stats.in_conns_broken_total += 1
-				stats.mu.Unlock()
+				in_conns_broken_total.Inc(1)
 			}
 			if len(str) > 0 {
 				// todo handle incomplete reads
 				fmt.Printf("WARN incomplete read, line read: '%s'. neglecting line because connection closed because of %s\n", str, err.Error())
 			}
-			stats.mu.Lock()
-			stats.in_conns_current -= 1
-			stats.mu.Unlock()
 			return
 		}
-		input_lines <- buf
+		lines_read <- buf
 	}
-	stats.mu.Lock()
-	stats.in_conns_current -= 1
-	stats.mu.Unlock()
 }
 
 func processInputLines() {
-	for buf := range input_lines {
+	equals := []byte("=")
+	for buf := range lines_read {
 		str := string(buf)
-		if strings.ContainsAny(str, "=") {
+		if bytes.Contains(buf, equals) {
 			str = strings.TrimSpace(str)
 			metric, err := parseTagBasedMetric(str)
 			if err != nil {
-				stats.mu.Lock()
-				stats.in_metrics_proto2_bad_total += 1
-				stats.mu.Unlock()
+				in_metrics_proto2_bad_total.Inc(1)
 			} else {
-				stats.mu.Lock()
-				stats.in_metrics_proto2_good_total += 1
-				stats.mu.Unlock()
-				metrics_to_track <- metric
+				in_metrics_proto2_good_total.Inc(1)
+				proto2_read <- metric
 			}
 		} else {
 			elements := strings.Split(str, " ")
-			stats.mu.Lock()
 			if len(elements) == 3 {
-				stats.in_metrics_proto1_good_total += 1
-				stats.seen_proto1[elements[0]] = true
+				in_metrics_proto1_good_total.Inc(1)
+				proto1_read <- str
 			} else {
-				stats.in_metrics_proto1_bad_total += 1
+				in_metrics_proto1_bad_total.Inc(1)
 			}
-			stats.mu.Unlock()
 		}
 	}
 }
 
-func writeHelp(conn net.Conn) {
-	help := `
-commands:
-    help         show this menu
-    seen_proto1  list all proto1 metric keys seen so far
-    seen_proto2  list all proto2 metric keys seen and sent to ES so far
-    stats        show internal metrics performance stats
-
-`
-	conn.Write([]byte(help))
-}
-
-// handleApiRequest handles one or more api requests over the admin interface.
-// WARNING/TODO: for now, a slow admin connection could lock the stats too long
-// we should decouple this a little more
-func handleApiRequest(conn net.Conn, write_first bytes.Buffer) {
-	write_first.WriteTo(conn)
-	// Make a buffer to hold incoming data.
-	buf := make([]byte, 1024)
-	// Read the incoming connection into the buffer.
+func trackProto1() {
+	seen := make(map[string]bool)
 	for {
-		n, err := conn.Read(buf)
-		if err != nil {
-			if err == io.EOF {
-				fmt.Println("read eof. closing")
-				conn.Close()
-				break
-			} else {
-				fmt.Println("Error reading:", err.Error())
-			}
-		}
-		clean_cmd := strings.TrimSpace(string(buf[:n]))
-		command := strings.Split(clean_cmd, " ")
-		switch command[0] {
-		case "seen_proto1":
-			stats.mu.Lock()
-			for metric := range stats.seen_proto1 {
-				conn.Write([]byte(metric))
-				conn.Write([]byte("\n"))
-			}
-			stats.mu.Unlock()
-		case "seen_proto2":
-			stats.mu.Lock()
-			for metric := range stats.seen_proto2 {
-				conn.Write([]byte(metric))
-				conn.Write([]byte("\n"))
-			}
-			stats.mu.Unlock()
-		case "stats":
-			vals := stats.GetStats()
-			var keys []string
-			for k := range vals {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
-				conn.Write([]byte(fmt.Sprintf("%80s %d\n", k, vals[k])))
-			}
-		case "help":
-			writeHelp(conn)
-		default:
-			conn.Write([]byte("unknown command\n"))
-			writeHelp(conn)
+		select {
+		case buf := <-proto1_read:
+			seen[buf] = true
+		case <-num_seen_proto1.valueReq:
+			num_seen_proto1.valueResp <- int64(len(seen))
+			seen = make(map[string]bool)
 		}
 	}
 }
-func adminListener(admin_addr string) {
-	l, err := net.Listen("tcp", admin_addr)
-	if err != nil {
-		fmt.Println("Error listening:", err.Error())
-		os.Exit(1)
-	}
-	defer l.Close()
-	fmt.Println("Admin interface listening on " + admin_addr)
+
+func trackProto2(indexer *core.BulkIndexer, index_name string) {
+	seen := make(map[string]bool)  // for ES. seen once = never need to resubmit
+	seen2 := make(map[string]bool) // for stats, provides "how many recently seen?"
 	for {
-		// Listen for an incoming connection.
-		conn, err := l.Accept()
-		if err != nil {
-			fmt.Println("Error accepting: ", err.Error())
-			os.Exit(1)
+		select {
+		case metric := <-proto2_read:
+			seen2[metric.metric_id] = true
+			if _, ok := seen[metric.metric_id]; ok {
+				continue
+			}
+			date := time.Now()
+			refresh := false // we can wait until the regular indexing runs
+			metric_es := NewMetricEs(metric)
+			err := indexer.Index(index_name, "metric", metric.metric_id, "", &date, &metric_es, refresh)
+			dieIfError(err)
+			seen[metric.metric_id] = true
+		case <-num_metrics_to_track.valueReq:
+			num_metrics_to_track.valueResp <- int64(len(proto2_read))
+		case <-num_seen_proto2.valueReq:
+			num_seen_proto2.valueResp <- int64(len(seen2))
+			seen2 = make(map[string]bool)
 		}
-		go handleApiRequest(conn, bytes.Buffer{})
 	}
 }
