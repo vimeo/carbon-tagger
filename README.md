@@ -10,12 +10,12 @@ Carbon-tagger implements [metrics 2.0](http://dieter.plaetinck.be/metrics_2_a_pr
 
 It does this by using an axtended graphite protocol (backwards compatible):
 
-* nodes can be old-style values, or new-style `key=val` tag pairs
-* if there's a "=" in one or more of the nodes, we'll try to parse as `proto2` and add it to the index if below conditions are met.
+* nodes can be old-style values, or new-style `key=val` or `key_is_val` tag pairs.  (Some versions of graphite-web/graphite-api struggle with equals signs, so the latter format is recommended)
+* if there's a "=" or "_is_" in one or more of the nodes, we'll try to parse as `proto2` and add it to the index if below conditions are met.
 * there must be a tag pair with `unit` as tag key.
 * there must be at least one other tag.
 * you can freely choose the order of the nodes for every metric, but when you change the order, you change the metric key.
-* old-style nodes (i.e. not "key=val" format) implicitly get an "nX" tag key where X is the node position in the string, starting from 1.
+* old-style nodes (i.e. not "key=val" or `key_is_val` format) within a proto2 metric implicitly get an "nX" tag key where X is the node position in the string, starting from 1.
 
 You'll probably want to follow the [metrics naming conventions](https://github.com/vimeo/graph-explorer/wiki/Consistent-tag-keys-and-values),
 specifically [apply the correct units](https://github.com/vimeo/graph-explorer/wiki/Units-%26-Prefixes)

@@ -138,9 +138,14 @@ func parseTagBasedMetric(metric_line string) (metric metricSpec, err error) {
 	nodes := strings.Split(metric_id, ".")
 	tags := make(map[string]string)
 	for i, node := range nodes {
-		tag := strings.Split(node, "=")
+		var tag []string
+		if strings.Contains(node, "_is_") {
+			tag = strings.Split(node, "_is_")
+		} else {
+			tag = strings.Split(node, "=")
+		}
 		if len(tag) > 2 {
-			return metricSpec{metric_id, nil}, errors.New("bad metric spec: more than 1 equals sign")
+			return metricSpec{metric_id, nil}, errors.New("bad metric spec: more than 1 equals")
 		} else if len(tag) < 2 {
 			tags[fmt.Sprintf("n%d", i+1)] = node
 		} else if tag[0] == "" || tag[1] == "" {
@@ -187,10 +192,11 @@ func handleClient(conn_in net.Conn) {
 }
 
 func processInputLines() {
-	equals := []byte("=")
+	equals1 := []byte("=")
+	equals2 := []byte("_is_")
 	for buf := range lines_read {
 		str := string(buf)
-		if bytes.Contains(buf, equals) {
+		if bytes.Contains(buf, equals1) || bytes.Contains(buf, equals2) {
 			str = strings.TrimSpace(str)
 			metric, err := parseTagBasedMetric(str)
 			if err != nil {
