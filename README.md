@@ -47,18 +47,7 @@ to have a realtime database. you could get all metricnames later and process the
 
 # internal metrics
 
-are in proto2 format and are also tracked in ES automatically. they are also available through the admin interface
-
-# admin telnet interface
-
-commands:
-
-```
-    help         show this menu
-    seen_proto1  list all proto1 metric keys seen so far
-    seen_proto2  list all proto2 metric keys seen and sent to ES so far
-    stats        show internal metrics performance stats
-```
+are in proto2 format and are also tracked in ES automatically.
 
 # performance
 
