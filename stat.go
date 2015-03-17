@@ -23,7 +23,7 @@ type stat struct {
 }
 
 func NewCounter(key string, customValue bool) stat {
-	name := fmt.Sprintf("service=carbon-tagger.instance=%s.target_type=counter.%s", *stats_id, key)
+	name := fmt.Sprintf("service_is_carbon-tagger.instance_is_%s.target_type_is_counter.%s", *stats_id, key)
 	stat := stat{val: metrics.NewCounter()}
 	metrics.Register(name, stat)
 	if customValue {
@@ -33,7 +33,7 @@ func NewCounter(key string, customValue bool) stat {
 	return stat
 }
 func NewGauge(key string, customValue bool) stat {
-	name := fmt.Sprintf("service=carbon-tagger.instance=%s.target_type=gauge.%s", *stats_id, key)
+	name := fmt.Sprintf("service_is_carbon-tagger.instance_is_%s.target_type_is_gauge.%s", *stats_id, key)
 	stat := stat{val: metrics.NewCounter()}
 	metrics.Register(name, stat)
 	if customValue {

@@ -78,15 +78,15 @@ func main() {
 	err := config.Parse(*configFile)
 	dieIfError(err)
 
-	in_conns_current = NewGauge("unit=Conn.direction=in.type=open", false)
-	in_conns_broken_total = NewCounter("unit=Conn.direction=in.type=broken", false)
-	in_metrics_proto1_good_total = NewCounter("unit=Metric.proto=1.direction=in.type=good", false) // no thorough check
-	in_metrics_proto2_good_total = NewCounter("unit=Metric.proto=2.direction=in.type=good", false)
-	in_metrics_proto1_bad_total = NewCounter("unit=Err.type=invalid_line.proto=1.direction", false)
-	in_metrics_proto2_bad_total = NewCounter("unit=Err.type=invalid_line.proto=2.direction", false)
-	num_metrics_to_track = NewCounter("unit=Metric.proto=2.type=to_track", true)
-	num_seen_proto1 = NewGauge("unit=Metric.proto=1.type=tracked", true)
-	num_seen_proto2 = NewGauge("unit=Metric.proto=2.type=tracked", true)
+	in_conns_current = NewGauge("unit_is_Conn.direction_is_in.type_is_open", false)
+	in_conns_broken_total = NewCounter("unit_is_Conn.direction_is_in.type_is_broken", false)
+	in_metrics_proto1_good_total = NewCounter("unit_is_Metric.proto_is_1.direction_is_in.type_is_good", false) // no thorough check
+	in_metrics_proto2_good_total = NewCounter("unit_is_Metric.proto_is_2.direction_is_in.type_is_good", false)
+	in_metrics_proto1_bad_total = NewCounter("unit_is_Err.type_is_invalid_line.proto_is_1.direction_is_in", false)
+	in_metrics_proto2_bad_total = NewCounter("unit_is_Err.type_is_invalid_line.proto_is_2.direction_is_in", false)
+	num_metrics_to_track = NewCounter("unit_is_Metric.proto_is_2.type_is_to_track", true)
+	num_seen_proto1 = NewGauge("unit_is_Metric.proto_is_1.type_is_tracked", true)
+	num_seen_proto2 = NewGauge("unit_is_Metric.proto_is_2.type_is_tracked", true)
 
 	lines_read = make(chan []byte)
 	proto1_read = make(chan string)
