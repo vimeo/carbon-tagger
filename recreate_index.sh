@@ -8,6 +8,11 @@ if [ -z "$index" ]; then
     exit 2
 fi
 echo "delete existing index $index (maybe)"
+echo curl -X DELETE http://$host:$port/$index
+echo "ok? hit any key or ctrl-c to cancel"
+read
+echo "ok continuing.."
+echo "deleting index $index"
 curl -X DELETE http://$host:$port/$index
 echo
 echo "create index $index"
