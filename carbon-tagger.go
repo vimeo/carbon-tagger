@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"github.com/Dieterbe/go-metrics"
+	"github.com/Dieterbe/go-metrics/exp"
 	"github.com/mattbaird/elastigo/api"
 	"github.com/mattbaird/elastigo/core"
 	"github.com/stvp/go-toml-config"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"runtime/pprof"
 	"strconv"
@@ -30,13 +32,14 @@ var (
 	memprofile = flag.String("memprofile", "", "write memory profile to this file")
 	configFile = flag.String("config", "carbon-tagger.conf", "config file")
 
-	es_host        = config.String("elasticsearch.host", "undefined")
-	es_port        = config.Int("elasticsearch.port", 9200)
-	es_index_name  = config.String("elasticsearch.index", "graphite_metrics2")
-	es_max_pending = config.Int("elasticsearch.max_pending", 1000000)
-	in_port        = config.Int("in.port", 2003)
-	out_host       = config.String("out.host", "localhost")
-	out_port       = config.Int("out.port", 2005)
+	es_host         = config.String("elasticsearch.host", "undefined")
+	es_port         = config.Int("elasticsearch.port", 9200)
+	es_index_name   = config.String("elasticsearch.index", "graphite_metrics2")
+	es_max_pending  = config.Int("elasticsearch.max_pending", 1000000)
+	in_port         = config.Int("in.port", 2003)
+	stats_host      = config.String("stats.host", "localhost")
+	stats_port      = config.Int("stats.port", 2005)
+	stats_http_addr = config.String("stats.http_addr", "localhost:8123")
 
 	stats_id             *string
 	stats_flush_interval *int
@@ -104,7 +107,7 @@ func main() {
 	// 1 worker, but ES library has multiple workers
 	go trackProto2(indexer, *es_index_name)
 
-	statsAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", *out_host, *out_port))
+	statsAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", *stats_host, *stats_port))
 	dieIfError(err)
 	go metrics.Graphite(metrics.DefaultRegistry, time.Duration(*stats_flush_interval)*time.Second, "", statsAddr)
 
@@ -114,6 +117,15 @@ func main() {
 	listener, err := net.ListenTCP("tcp", addr)
 	dieIfError(err)
 	defer listener.Close()
+	go func() {
+		exp.Exp(metrics.DefaultRegistry)
+		err := http.ListenAndServe(*stats_http_addr, nil)
+		if err != nil {
+			fmt.Println("Error opening http endpoint:", err.Error())
+			os.Exit(1)
+		}
+	}()
+
 	fmt.Printf("carbon-tagger %s listening on %d\n", *stats_id, *in_port)
 	for {
 		// would be nice to have a metric showing highest amount of connections seen per interval

@@ -47,7 +47,8 @@ to have a realtime database. you could get all metricnames later and process the
 
 # internal metrics
 
-are in proto2 format and are also tracked in ES automatically.
+are in proto2 format and are submitted to a carbon endpoint (typically your relay)
+they are also available on the http address at /debug/vars2
 
 # performance
 
