@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/Dieterbe/go-metrics"
+	"github.com/vimeo/carbon-tagger/_third_party/github.com/Dieterbe/go-metrics"
 )
 
 // note in metrics2.0 counter is a type of gauge that only increases

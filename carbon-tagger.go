@@ -5,11 +5,10 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"github.com/Dieterbe/go-metrics"
-	"github.com/Dieterbe/go-metrics/exp"
-	"github.com/mattbaird/elastigo/api"
-	"github.com/mattbaird/elastigo/core"
-	"github.com/stvp/go-toml-config"
+	"github.com/vimeo/carbon-tagger/_third_party/github.com/Dieterbe/go-metrics"
+	"github.com/vimeo/carbon-tagger/_third_party/github.com/Dieterbe/go-metrics/exp"
+	elastigo "github.com/vimeo/carbon-tagger/_third_party/github.com/mattbaird/elastigo/lib"
+	"github.com/vimeo/carbon-tagger/_third_party/github.com/stvp/go-toml-config"
 	"io"
 	"net"
 	"net/http"
@@ -35,11 +34,13 @@ var (
 	es_host         = config.String("elasticsearch.host", "undefined")
 	es_port         = config.Int("elasticsearch.port", 9200)
 	es_index_name   = config.String("elasticsearch.index", "graphite_metrics2")
-	es_max_pending  = config.Int("elasticsearch.max_pending", 1000000)
+	es_flush_int    = config.Int("elasticsearch.flush_interval", 2)
+	es_max_backlog  = config.Int("elasticsearch.max_backlog", 1000) // if this many is in transit to indexer, start blocking
+	es_max_pending  = config.Int("elasticsearch.max_pending", 500)
 	in_port         = config.Int("in.port", 2003)
 	stats_host      = config.String("stats.host", "localhost")
 	stats_port      = config.Int("stats.port", 2005)
-	stats_http_addr = config.String("stats.http_addr", "localhost:8123")
+	stats_http_addr = config.String("stats.http_addr", "0.0.0.0:8123")
 
 	stats_id             *string
 	stats_flush_interval *int
@@ -50,9 +51,12 @@ var (
 	in_metrics_proto2_good_total stat
 	in_metrics_proto1_bad_total  stat
 	in_metrics_proto2_bad_total  stat
-	num_metrics_to_track         stat // backlog in our queue (excl elastigo queue)
 	num_seen_proto2              stat
 	num_seen_proto1              stat
+	pending_backlog_proto1       stat // backlog in our queue (excl elastigo queue)
+	pending_backlog_proto2       stat // backlog in our queue (excl elastigo queue)
+	pending_es_proto1            stat
+	pending_es_proto2            stat
 
 	lines_read  chan []byte
 	proto1_read chan string
@@ -86,26 +90,36 @@ func main() {
 	in_metrics_proto2_good_total = NewCounter("unit_is_Metric.proto_is_2.direction_is_in.type_is_good", false)
 	in_metrics_proto1_bad_total = NewCounter("unit_is_Err.type_is_invalid_line.proto_is_1.direction_is_in", false)
 	in_metrics_proto2_bad_total = NewCounter("unit_is_Err.type_is_invalid_line.proto_is_2.direction_is_in", false)
-	num_metrics_to_track = NewCounter("unit_is_Metric.proto_is_2.type_is_to_track", true)
 	num_seen_proto1 = NewGauge("unit_is_Metric.proto_is_1.type_is_tracked", true)
 	num_seen_proto2 = NewGauge("unit_is_Metric.proto_is_2.type_is_tracked", true)
+	pending_backlog_proto1 = NewCounter("unit_is_Metric.proto_is_1.type_is_pending_in_backlog", true)
+	pending_backlog_proto2 = NewCounter("unit_is_Metric.proto_is_2.type_is_pending_in_backlog", true)
+	pending_es_proto1 = NewGauge("unit_is_Metric.proto_is_1.type_is_pending_in_es", true)
+	pending_es_proto2 = NewGauge("unit_is_Metric.proto_is_2.type_is_pending_in_es", true)
 
 	lines_read = make(chan []byte)
-	proto1_read = make(chan string)
-	// we can queue up to max_pending: if more than that are pending flush to ES, start blocking..
-	proto2_read = make(chan metricSpec, *es_max_pending)
+	proto1_read = make(chan string, *es_max_backlog)
+	proto2_read = make(chan metricSpec, *es_max_backlog)
 
 	// connect to elasticsearch database to store tags
-	api.Domain = *es_host
-	api.Port = strconv.Itoa(*es_port)
-	done := make(chan bool)
-	indexer := core.NewBulkIndexer(4)
-	indexer.Run(done)
+	es := elastigo.NewConn()
+	es.Domain = *es_host
+	es.Port = strconv.Itoa(*es_port)
+
+	indexer1 := es.NewBulkIndexer(4)
+	indexer1.BulkMaxDocs = *es_max_pending
+	indexer1.BufferDelayMax = time.Duration(*es_flush_int) * time.Second
+	indexer1.Start()
+
+	indexer2 := es.NewBulkIndexer(4)
+	indexer1.BulkMaxDocs = *es_max_pending
+	indexer1.BufferDelayMax = time.Duration(*es_flush_int) * time.Second
+	indexer2.Start()
 
 	go processInputLines()
-	go trackProto1()
 	// 1 worker, but ES library has multiple workers
-	go trackProto2(indexer, *es_index_name)
+	go trackProto1(indexer1, *es_index_name)
+	go trackProto2(indexer2, *es_index_name)
 
 	statsAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", *stats_host, *stats_port))
 	dieIfError(err)
@@ -119,6 +133,7 @@ func main() {
 	defer listener.Close()
 	go func() {
 		exp.Exp(metrics.DefaultRegistry)
+		fmt.Printf("carbon-tagger %s expvar web on %s\n", *stats_id, *stats_http_addr)
 		err := http.ListenAndServe(*stats_http_addr, nil)
 		if err != nil {
 			fmt.Println("Error opening http endpoint:", err.Error())
@@ -177,10 +192,10 @@ func processInputLines() {
 				proto2_read <- *metric
 			}
 		} else {
-			elements := strings.Split(str, " ")
+			elements := strings.Split(strings.TrimSpace(str), " ")
 			if len(elements) == 3 {
 				in_metrics_proto1_good_total.Inc(1)
-				proto1_read <- str
+				proto1_read <- elements[0]
 			} else {
 				in_metrics_proto1_bad_total.Inc(1)
 			}
@@ -188,27 +203,41 @@ func processInputLines() {
 	}
 }
 
-func trackProto1() {
-	seen := make(map[string]bool)
+func trackProto1(indexer *elastigo.BulkIndexer, index_name string) {
+	seenEs := make(map[string]bool)    // for ES. seen once = never need to resubmit
+	seenStats := make(map[string]bool) // for stats, provides "how many recently seen?"
 	for {
 		select {
-		case buf := <-proto1_read:
-			seen[buf] = true
+		case str := <-proto1_read:
+			seenStats[str] = true
+			if _, ok := seenEs[str]; ok {
+				continue
+			}
+			date := time.Now()
+			refresh := false // we can wait until the regular indexing runs
+			metric_es := MetricEs{Tags: make([]string, 0)}
+			err := indexer.Index(index_name, "metric", str, "", &date, &metric_es, refresh)
+			dieIfError(err)
+			seenEs[str] = true
 		case <-num_seen_proto1.valueReq:
-			num_seen_proto1.valueResp <- int64(len(seen))
-			seen = make(map[string]bool)
+			num_seen_proto1.valueResp <- int64(len(seenStats))
+			seenStats = make(map[string]bool)
+		case <-pending_backlog_proto1.valueReq:
+			pending_backlog_proto1.valueResp <- int64(len(proto1_read))
+		case <-pending_es_proto1.valueReq:
+			pending_es_proto1.valueResp <- int64(indexer.PendingDocuments())
 		}
 	}
 }
 
-func trackProto2(indexer *core.BulkIndexer, index_name string) {
-	seen := make(map[string]bool)  // for ES. seen once = never need to resubmit
-	seen2 := make(map[string]bool) // for stats, provides "how many recently seen?"
+func trackProto2(indexer *elastigo.BulkIndexer, index_name string) {
+	seenEs := make(map[string]bool)    // for ES. seen once = never need to resubmit
+	seenStats := make(map[string]bool) // for stats, provides "how many recently seen?"
 	for {
 		select {
 		case metric := <-proto2_read:
-			seen2[metric.metric_id] = true
-			if _, ok := seen[metric.metric_id]; ok {
+			seenStats[metric.metric_id] = true
+			if _, ok := seenEs[metric.metric_id]; ok {
 				continue
 			}
 			date := time.Now()
@@ -216,12 +245,14 @@ func trackProto2(indexer *core.BulkIndexer, index_name string) {
 			metric_es := NewMetricEs(metric)
 			err := indexer.Index(index_name, "metric", metric.metric_id, "", &date, &metric_es, refresh)
 			dieIfError(err)
-			seen[metric.metric_id] = true
-		case <-num_metrics_to_track.valueReq:
-			num_metrics_to_track.valueResp <- int64(len(proto2_read))
+			seenEs[metric.metric_id] = true
 		case <-num_seen_proto2.valueReq:
-			num_seen_proto2.valueResp <- int64(len(seen2))
-			seen2 = make(map[string]bool)
+			num_seen_proto2.valueResp <- int64(len(seenStats))
+			seenStats = make(map[string]bool)
+		case <-pending_backlog_proto2.valueReq:
+			pending_backlog_proto2.valueResp <- int64(len(proto2_read))
+		case <-pending_es_proto2.valueReq:
+			pending_es_proto2.valueResp <- int64(indexer.PendingDocuments())
 		}
 	}
 }
