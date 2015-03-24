@@ -27,6 +27,7 @@ func dieIfError(err error) {
 }
 
 var (
+	verbose    bool
 	cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 	memprofile = flag.String("memprofile", "", "write memory profile to this file")
 	configFile = flag.String("config", "carbon-tagger.conf", "config file")
@@ -49,7 +50,8 @@ var (
 	in_conns_broken_total        stat
 	in_metrics_proto1_good_total stat
 	in_metrics_proto2_good_total stat
-	in_metrics_proto2_bad_total  stat // note: proto1 can contain whatever, so can't be bad
+	in_metrics_proto1_bad_total  stat
+	in_metrics_proto2_bad_total  stat
 	in_lines_bad_total           stat
 	num_seen_proto2              stat
 	num_seen_proto1              stat
@@ -62,6 +64,10 @@ var (
 	proto1_read chan string
 	proto2_read chan m20.MetricSpec
 )
+
+func init() {
+	flag.BoolVar(&verbose, "verbose", false, "print invalid lines and metrics")
+}
 
 func main() {
 	flag.Parse()
@@ -88,6 +94,7 @@ func main() {
 	in_conns_broken_total = NewCounter("unit_is_Conn.direction_is_in.type_is_broken", false)
 	in_metrics_proto1_good_total = NewCounter("unit_is_Metric.proto_is_1.direction_is_in.type_is_good", false) // no thorough check
 	in_metrics_proto2_good_total = NewCounter("unit_is_Metric.proto_is_2.direction_is_in.type_is_good", false)
+	in_metrics_proto1_bad_total = NewCounter("unit_is_Err.orig_unit_is_Metric.type_is_invalid.proto_is_1.direction_is_in", false)
 	in_metrics_proto2_bad_total = NewCounter("unit_is_Err.orig_unit_is_Metric.type_is_invalid.proto_is_2.direction_is_in", false)
 	in_lines_bad_total = NewCounter("unit_is_Err.orig_unit_is_Msg.type_is_invalid_line.direction_is_in", false)
 	num_seen_proto1 = NewGauge("unit_is_Metric.proto_is_1.type_is_tracked", true)
@@ -182,6 +189,9 @@ func processInputLines() {
 		str := strings.TrimSpace(string(buf))
 		elements := strings.Split(str, " ")
 		if len(elements) != 3 {
+			if verbose {
+				fmt.Println("line has !=3 elements:", str)
+			}
 			in_lines_bad_total.Inc(1)
 			continue
 		}
@@ -189,14 +199,25 @@ func processInputLines() {
 		if m20.IsMetric20(id) {
 			metric, err := m20.NewMetricSpec(id)
 			if err != nil {
+				if verbose {
+					fmt.Println(err)
+				}
 				in_metrics_proto2_bad_total.Inc(1)
 			} else {
 				in_metrics_proto2_good_total.Inc(1)
 				proto2_read <- *metric
 			}
 		} else {
-			in_metrics_proto1_good_total.Inc(1)
-			proto1_read <- elements[0]
+			err := m20.InitialValidation(id, m20.Legacy)
+			if err != nil {
+				if verbose {
+					fmt.Println(err)
+				}
+				in_metrics_proto1_bad_total.Inc(1)
+			} else {
+				in_metrics_proto1_good_total.Inc(1)
+				proto1_read <- elements[0]
+			}
 		}
 	}
 }
