@@ -23,7 +23,7 @@ curl -XPOST $host:$port/$index -d '{
     "mappings" : {
         "metric" : {
             "_source" : { "enabled" : true },
-            "_id": {"index": "not_analyzed", "store" : "yes"},
+            "_id": {"index": "not_analyzed", "store" : true},
             "properties" : {
                 "tags" : {"type" : "string", "index" : "not_analyzed" }
             }
