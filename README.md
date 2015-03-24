@@ -30,6 +30,12 @@ This is [metrics 2.0](http://dieter.plaetinck.be/metrics_2_a_proposal.html) but
 * you can use units like "Mbps" or "Errps" to mean "Mb/s" and "Err/s".  Graphite treats slashes as delimiters. Carbon-tagger will set the 
   proper unit tag.
 
+# indexing
+
+* Indexes metrics 2.0 full (_id and tag)
+* legacy metrics, just the _id, so you can search for it. (empty tags property)
+it's up to a tool like graph-explorer to create or update documents for legacy metrics with tags enabled.
+
 
 
 # how does this affect the rest of my stack?
@@ -65,12 +71,11 @@ probably carbon-cache (whisper) was being the bottleneck?
 * make sure the bulk thing uses 'create' and doesn't update/replace the doc every time
 * it seems like ES doesn't contain _all_ metrics (on 2M unique inserts, ES' count is 1889300)
 * better mapping, _source, type analyzing?
+* don't store legacy metrics with empty tags, if already exists. now it will temporarily break graph-explorer's structured metrics (until the latter indexes again)
 
 # future optimisations
 
-* if metrics are already in already_tracked, don't put them in the channel
 * populate an ES cache from disk on program start
-* infinitely sized "to track" queue that spills to disk when needed
 * forward_lines channel buffering, so that runtime doesn't have to switch Gs all the time?
 * GOMAXPROCS
 
