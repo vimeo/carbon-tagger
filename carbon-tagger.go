@@ -2,9 +2,9 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"flag"
 	"fmt"
+	m20 "github.com/metrics20/go-metrics20"
 	"github.com/vimeo/carbon-tagger/_third_party/github.com/Dieterbe/go-metrics"
 	"github.com/vimeo/carbon-tagger/_third_party/github.com/Dieterbe/go-metrics/exp"
 	elastigo "github.com/vimeo/carbon-tagger/_third_party/github.com/mattbaird/elastigo/lib"
@@ -49,8 +49,8 @@ var (
 	in_conns_broken_total        stat
 	in_metrics_proto1_good_total stat
 	in_metrics_proto2_good_total stat
-	in_metrics_proto1_bad_total  stat
-	in_metrics_proto2_bad_total  stat
+	in_metrics_proto2_bad_total  stat // note: proto1 can contain whatever, so can't be bad
+	in_lines_bad_total           stat
 	num_seen_proto2              stat
 	num_seen_proto1              stat
 	pending_backlog_proto1       stat // backlog in our queue (excl elastigo queue)
@@ -60,7 +60,7 @@ var (
 
 	lines_read  chan []byte
 	proto1_read chan string
-	proto2_read chan metricSpec
+	proto2_read chan m20.MetricSpec
 )
 
 func main() {
@@ -88,8 +88,8 @@ func main() {
 	in_conns_broken_total = NewCounter("unit_is_Conn.direction_is_in.type_is_broken", false)
 	in_metrics_proto1_good_total = NewCounter("unit_is_Metric.proto_is_1.direction_is_in.type_is_good", false) // no thorough check
 	in_metrics_proto2_good_total = NewCounter("unit_is_Metric.proto_is_2.direction_is_in.type_is_good", false)
-	in_metrics_proto1_bad_total = NewCounter("unit_is_Err.type_is_invalid_line.proto_is_1.direction_is_in", false)
-	in_metrics_proto2_bad_total = NewCounter("unit_is_Err.type_is_invalid_line.proto_is_2.direction_is_in", false)
+	in_metrics_proto2_bad_total = NewCounter("unit_is_Err.orig_unit_is_Metric.type_is_invalid.proto_is_2.direction_is_in", false)
+	in_lines_bad_total = NewCounter("unit_is_Err.orig_unit_is_Msg.type_is_invalid_line.direction_is_in", false)
 	num_seen_proto1 = NewGauge("unit_is_Metric.proto_is_1.type_is_tracked", true)
 	num_seen_proto2 = NewGauge("unit_is_Metric.proto_is_2.type_is_tracked", true)
 	pending_backlog_proto1 = NewCounter("unit_is_Metric.proto_is_1.type_is_pending_in_backlog", true)
@@ -99,7 +99,7 @@ func main() {
 
 	lines_read = make(chan []byte)
 	proto1_read = make(chan string, *es_max_backlog)
-	proto2_read = make(chan metricSpec, *es_max_backlog)
+	proto2_read = make(chan m20.MetricSpec, *es_max_backlog)
 
 	// connect to elasticsearch database to store tags
 	es := elastigo.NewConn()
@@ -178,13 +178,16 @@ func handleClient(conn_in net.Conn) {
 }
 
 func processInputLines() {
-	equals1 := []byte("=")
-	equals2 := []byte("_is_")
 	for buf := range lines_read {
-		str := string(buf)
-		if bytes.Contains(buf, equals1) || bytes.Contains(buf, equals2) {
-			str = strings.TrimSpace(str)
-			metric, err := NewMetricSpec(str)
+		str := strings.TrimSpace(string(buf))
+		elements := strings.Split(str, " ")
+		if len(elements) != 3 {
+			in_lines_bad_total.Inc(1)
+			continue
+		}
+		id := elements[0]
+		if m20.IsMetric20(id) {
+			metric, err := m20.NewMetricSpec(id)
 			if err != nil {
 				in_metrics_proto2_bad_total.Inc(1)
 			} else {
@@ -192,13 +195,8 @@ func processInputLines() {
 				proto2_read <- *metric
 			}
 		} else {
-			elements := strings.Split(strings.TrimSpace(str), " ")
-			if len(elements) == 3 {
-				in_metrics_proto1_good_total.Inc(1)
-				proto1_read <- elements[0]
-			} else {
-				in_metrics_proto1_bad_total.Inc(1)
-			}
+			in_metrics_proto1_good_total.Inc(1)
+			proto1_read <- elements[0]
 		}
 	}
 }
@@ -215,7 +213,7 @@ func trackProto1(indexer *elastigo.BulkIndexer, index_name string) {
 			}
 			date := time.Now()
 			refresh := false // we can wait until the regular indexing runs
-			metric_es := MetricEs{Tags: make([]string, 0)}
+			metric_es := m20.MetricEs{Tags: make([]string, 0)}
 			err := indexer.Index(index_name, "metric", str, "", &date, &metric_es, refresh)
 			dieIfError(err)
 			seenEs[str] = true
@@ -236,16 +234,16 @@ func trackProto2(indexer *elastigo.BulkIndexer, index_name string) {
 	for {
 		select {
 		case metric := <-proto2_read:
-			seenStats[metric.metric_id] = true
-			if _, ok := seenEs[metric.metric_id]; ok {
+			seenStats[metric.Id] = true
+			if _, ok := seenEs[metric.Id]; ok {
 				continue
 			}
 			date := time.Now()
 			refresh := false // we can wait until the regular indexing runs
-			metric_es := NewMetricEs(metric)
-			err := indexer.Index(index_name, "metric", metric.metric_id, "", &date, &metric_es, refresh)
+			metric_es := m20.NewMetricEs(metric)
+			err := indexer.Index(index_name, "metric", metric.Id, "", &date, &metric_es, refresh)
 			dieIfError(err)
-			seenEs[metric.metric_id] = true
+			seenEs[metric.Id] = true
 		case <-num_seen_proto2.valueReq:
 			num_seen_proto2.valueResp <- int64(len(seenStats))
 			seenStats = make(map[string]bool)
